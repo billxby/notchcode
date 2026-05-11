@@ -82,6 +82,7 @@ final class ProjectsWatcher {
             FSEventStreamCreateFlags(
                 kFSEventStreamCreateFlagFileEvents      // per-file events (not just dir)
                 | kFSEventStreamCreateFlagNoDefer       // first event delivered without waiting
+                | kFSEventStreamCreateFlagUseCFTypes    // deliver paths as CFArray<CFString>, not char**
             )
         )
 

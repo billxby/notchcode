@@ -18,10 +18,15 @@ struct NotchcodeApp: App {
         // (See App/NotchOverlay.swift for the AppKit/SwiftUI bridge.)
         NotchOverlay.shared.show()
 
-        // Start watching ~/.claude/projects/. The watcher pings the engine on
-        // every .jsonl modification; the engine's @Observable state propagates
-        // into NotchView automatically.
+        // File watcher (v0.2). Coarse "session is alive" signal; bumps
+        // lastUpdate on every .jsonl modification.
         ProjectsWatcher.shared.start(engine: SessionStateEngine.shared)
+
+        // Hook HTTP server (v0.3). Receives Claude Code's lifecycle events
+        // (PreToolUse, PostToolUse, UserPromptSubmit, Stop) via curl POSTs
+        // installed in ~/.claude/settings.json. Sub-second precision; carries
+        // tool names and the "waiting on user" signal that file mtimes can't.
+        HookServer.shared.start(engine: SessionStateEngine.shared)
     }
 
     var body: some Scene {

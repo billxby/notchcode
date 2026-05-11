@@ -1,0 +1,45 @@
+{
+  "_comment": "Merge this into ~/.claude/settings.json under the top-level 'hooks' key. Preserve any existing hook entries — this snippet only adds Notchcode-specific commands. v0.8 will ship a polished installer that does the merge automatically.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:9876/hook/PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:9876/hook/PostToolUse"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:9876/hook/UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:9876/hook/Stop"
+          }
+        ]
+      }
+    ]
+  }
+}

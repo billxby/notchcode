@@ -1,53 +1,54 @@
 // The SwiftUI view that lives INSIDE the notch panel.
 //
-// v0.2: reads from `SessionStateEngine` to display aggregate state. Because
-// the engine is `@Observable`, every property read inside `body` is auto-
-// tracked — when `engine.aggregateStatus` changes, SwiftUI rebuilds this view.
-// Equivalent to Riverpod's `ref.watch(...)` in Flutter, except the dependency
-// is implicit (just by reading the property).
+// v0.3: surfaces the richer status enum (working tool name, waiting, done,
+// error) coming from hook events. Visuals stay minimal — color tuning and
+// animations land in v0.4.
+//
+// Reactive plumbing: because SessionStateEngine is @Observable, every
+// property read inside `body` auto-subscribes. Like Riverpod's `ref.watch`
+// but implicit — no wrapper, no .obs, just a plain property access.
 
 import SwiftUI
 
 struct NotchView: View {
     let size: CGSize
-
-    /// The engine reference. With @Observable, plain `let` is enough — no
-    /// @ObservedObject wrapper needed. SwiftUI tracks reads of its properties.
     let engine: SessionStateEngine
 
     var body: some View {
         ZStack {
-            // Shape color reacts to status. v0.4 will animate this transition.
             NotchShape()
-                .fill(shapeColor)
+                .fill(.black)
 
-            // Status label. We read engine.activeSessions / aggregateStatus
-            // here → SwiftUI auto-subscribes → label updates as state changes.
             Text(statusLabel)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.85))
-                .monospacedDigit()   // session counts don't jitter as digits change
+                .monospacedDigit()
+                .lineLimit(1)
+                .padding(.horizontal, 12)
         }
         .frame(width: size.width, height: size.height)
         .ignoresSafeArea()
     }
 
-    // MARK: - Derived UI
-
-    private var shapeColor: Color {
-        switch engine.aggregateStatus {
-        case .idle:    return .black
-        case .working: return .black   // v0.4 will switch to a blue tint + spinner
-        }
-    }
+    // MARK: - Derived label
 
     private var statusLabel: String {
         let count = engine.activeSessions.count
         switch engine.aggregateStatus {
         case .idle:
             return "idle"
-        case .working:
-            return count == 1 ? "working" : "\(count) working"
+        case .working(let tool?):
+            // "Edit" / "Read" / "Bash" — Claude Code's tool names are already
+            // short and PascalCase. If multiple sessions, prefix the count.
+            return count > 1 ? "\(count) · \(tool)" : tool
+        case .working(nil):
+            return count > 1 ? "\(count) working" : "working"
+        case .waiting:
+            return count > 1 ? "\(count) waiting" : "waiting on you"
+        case .done:
+            return "done"
+        case .error(let msg):
+            return msg
         }
     }
 }
