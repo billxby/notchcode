@@ -74,6 +74,10 @@ final class HookServer {
                 print("[Notchcode] HookServer listening on 127.0.0.1:\(boundPort)")
             case .failed(let err):
                 print("[Notchcode] HookServer failed: \(err)")
+                // Tear down so a future start() isn't blocked by the idempotency
+                // guard. The most common cause is another process holding the
+                // port (usually a stale instance of this app).
+                Task { @MainActor in HookServer.shared.stop() }
             case .cancelled:
                 print("[Notchcode] HookServer cancelled")
             default:
@@ -161,6 +165,7 @@ final class HookServer {
             respond(conn: conn, status: "405 Method Not Allowed"); return
         }
         let path = String(parts[1])
+
         let prefix = "/hook/"
         guard path.hasPrefix(prefix) else {
             respond(conn: conn, status: "404 Not Found"); return
@@ -170,7 +175,8 @@ final class HookServer {
             respond(conn: conn, status: "400 Unknown Hook Kind"); return
         }
 
-        let event = HookEvent.decode(kind: kind, body: body)
+        let pid = Self.parseClaudePID(headers)
+        let event = HookEvent.decode(kind: kind, body: body, claudePid: pid)
         engine?.handleHookEvent(event)
         respond(conn: conn, status: "200 OK")
     }
@@ -192,6 +198,21 @@ final class HookServer {
             if lower.hasPrefix("content-length:") {
                 let value = lower.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
                 return Int(value)
+            }
+        }
+        return nil
+    }
+
+    /// v0.95 — extract `X-Claude-PID: <pid>` set by install-hooks.sh. Lets
+    /// the engine track a specific Claude Code process per session so the
+    /// notch can SIGTERM exactly one session without affecting siblings.
+    nonisolated private static func parseClaudePID(_ headerData: Data) -> Int32? {
+        guard let str = String(data: headerData, encoding: .utf8) else { return nil }
+        for line in str.split(separator: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("x-claude-pid:") {
+                let value = lower.dropFirst("x-claude-pid:".count).trimmingCharacters(in: .whitespaces)
+                return Int32(value)
             }
         }
         return nil

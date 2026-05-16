@@ -95,6 +95,91 @@ final class ProjectsWatcher {
         FSEventStreamSetDispatchQueue(stream, .main)
         FSEventStreamStart(stream)
         print("[Notchcode] Watching \(path)")
+
+        // v0.7 boot-time catch-up: scan today's JSONLs so dailyCostUSD
+        // reflects work done before Notchcode launched. After this the
+        // per-file cursor is at EOF; FSEvents take over from there.
+        catchUpToday(rootPath: path)
+    }
+
+    /// Walk `~/.claude/projects/<slug>/*.jsonl` once, parsing every file
+    /// whose mtime is today. Skips silently if the dir doesn't exist.
+    private func catchUpToday(rootPath: String) {
+        let fm = FileManager.default
+        guard let projects = try? fm.contentsOfDirectory(atPath: rootPath) else { return }
+
+        let calendar = Calendar.current
+        let now = Date()
+
+        var todaysFiles: [(url: URL, project: String)] = []
+        for slug in projects {
+            let projectDir = (rootPath as NSString).appendingPathComponent(slug)
+            guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else { continue }
+            let project = decodeProjectSlug(slug)
+            for name in files where name.hasSuffix(".jsonl") {
+                let path = (projectDir as NSString).appendingPathComponent(name)
+                let attrs = try? fm.attributesOfItem(atPath: path)
+                let mtime = attrs?[.modificationDate] as? Date ?? .distantPast
+                if calendar.isDate(mtime, inSameDayAs: now) {
+                    todaysFiles.append((URL(fileURLWithPath: path), project))
+                }
+            }
+        }
+        guard !todaysFiles.isEmpty else { return }
+
+        Task.detached(priority: .utility) { [weak engine = self.engine] in
+            // Pool events across ALL today's files, then sort chronologically.
+            // The engine's block-anchor state machine requires monotonically
+            // increasing timestamps to correctly identify which event starts
+            // the current 5h session block. Per-file processing would
+            // interleave cross-session timestamps and break the anchor.
+            //
+            // We deliberately do NOT pre-filter cost events by the 5h
+            // window: the state machine needs to see older events to know
+            // whether the current block is the user's first block of the
+            // day or block 2 / 3 / etc. pruneExpired() on the engine's
+            // buffer drops the stale ones lazily on the next read.
+            var allCosts: [JSONLParser.CostEvent] = []
+            var allMessages: [JSONLParser.MessageEvent] = []
+            for (url, project) in todaysFiles {
+                let result = await JSONLParser.shared.parseNew(at: url, project: project)
+                allCosts.append(contentsOf: result.costs)
+                allMessages.append(contentsOf: result.messages)
+            }
+            allCosts.sort { $0.timestamp < $1.timestamp }
+            allMessages.sort { $0.timestamp < $1.timestamp }
+
+            guard let engine, !allCosts.isEmpty || !allMessages.isEmpty else { return }
+            await MainActor.run {
+                for ev in allCosts {
+                    let usd = CostTracker.cost(for: ev.usage, model: ev.model)
+                    // Mirror the steady-state path: cache reads are bulk
+                    // re-served tokens, billed at 10× less and not what
+                    // Anthropic's quota meter charges against.
+                    let tokens = ev.usage.inputTokens
+                                 + ev.usage.outputTokens
+                                 + ev.usage.cacheCreate5mTokens
+                                 + ev.usage.cacheCreate1hTokens
+                    guard tokens > 0 else { continue }
+                    engine.recordUsage(
+                        sessionId: ev.sessionId,
+                        project: ev.project,
+                        tokens: tokens,
+                        usd: usd,
+                        at: ev.timestamp
+                    )
+                }
+                for msg in allMessages {
+                    engine.recordMessage(
+                        sessionId: msg.sessionId,
+                        project: msg.project,
+                        role: msg.role == .user ? .user : .assistant,
+                        text: msg.text,
+                        at: msg.timestamp
+                    )
+                }
+            }
+        }
     }
 
     func stop() {
@@ -117,6 +202,43 @@ final class ProjectsWatcher {
         let project = decodeProjectSlug(projectSlug)
 
         engine?.sessionFileTouched(sessionId: sessionId, project: project)
+
+        // v0.7: parse new assistant-message lines for cost data. Off-main
+        // because JSONL files can be megabytes after a long session and
+        // we don't want to stutter the notch animation.
+        Task.detached(priority: .utility) { [weak engine = self.engine] in
+            let result = await JSONLParser.shared.parseNew(at: url, project: project)
+            guard !result.costs.isEmpty || !result.messages.isEmpty, let engine else { return }
+            await MainActor.run {
+                for ev in result.costs {
+                    let usd = CostTracker.cost(for: ev.usage, model: ev.model)
+                    // Count only fresh compute: input + output + cache writes.
+                    // Cache reads are bulk re-served tokens — billed at 10× less
+                    // and not what Anthropic's quota meter charges against.
+                    let tokens = ev.usage.inputTokens
+                                 + ev.usage.outputTokens
+                                 + ev.usage.cacheCreate5mTokens
+                                 + ev.usage.cacheCreate1hTokens
+                    guard tokens > 0 else { continue }
+                    engine.recordUsage(
+                        sessionId: ev.sessionId,
+                        project: ev.project,
+                        tokens: tokens,
+                        usd: usd,
+                        at: ev.timestamp
+                    )
+                }
+                for msg in result.messages {
+                    engine.recordMessage(
+                        sessionId: msg.sessionId,
+                        project: msg.project,
+                        role: msg.role == .user ? .user : .assistant,
+                        text: msg.text,
+                        at: msg.timestamp
+                    )
+                }
+            }
+        }
     }
 
     /// Claude Code encodes project paths as folder names by replacing `/` with
