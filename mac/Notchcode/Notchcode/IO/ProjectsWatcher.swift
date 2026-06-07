@@ -244,7 +244,7 @@ final class ProjectsWatcher {
     }
 
     /// Claude Code encodes project paths as folder names by replacing `/` with
-    /// `-`, e.g. `/Users/you/notchcode` → `-Users-billxu-notchcode`. We just
+    /// `-`, e.g. `/Users/you/notchcode` → `-Users-you-notchcode`. We just
     /// take the last segment for display ("notchcode"). Full path decoding can
     /// land in v0.6 when the popover lists projects.
     private func decodeProjectSlug(_ slug: String) -> String {
