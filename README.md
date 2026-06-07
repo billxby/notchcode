@@ -73,7 +73,7 @@ Everything stays on your Mac. No analytics, no telemetry, no network calls beyon
 
 ## Contributing
 
-Contributions are welcome! Open an issue or a PR. The Windows port is the biggest open area, and themes are designed to be community-driven from the start.
+Contributions are welcome! Open an issue or a PR — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and ground rules. The Windows port is the biggest open area, and themes are designed to be community-driven from the start.
 
 ## Credits
 
