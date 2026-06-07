@@ -69,10 +69,14 @@ xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
 
 echo "==> Publishing GitHub release v$VERSION"
-gh release create "v$VERSION" "$DMG" \
-  --repo billxby/notchcode \
-  --title "Notchcode v$VERSION" \
-  --generate-notes
+if gh release view "v$VERSION" --repo billxby/notchcode >/dev/null 2>&1; then
+  gh release upload "v$VERSION" "$DMG" --clobber --repo billxby/notchcode
+else
+  gh release create "v$VERSION" "$DMG" \
+    --repo billxby/notchcode \
+    --title "Notchcode v$VERSION" \
+    --generate-notes
+fi
 
 echo ""
 echo "Done! Release: https://github.com/billxby/notchcode/releases/tag/v$VERSION"

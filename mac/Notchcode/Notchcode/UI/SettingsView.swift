@@ -8,7 +8,8 @@
 //   1. Usage tracking — plan tier, brake threshold (or $ cap), master toggle,
 //      approximation disclosure
 //   2. Claude Code integration — install / reinstall / remove hooks
-//   3. About — version and tagline
+//   3. General — open at login
+//   4. About — version and tagline
 //
 // Closed by the Done button at the top-right OR clicking outside the notch
 // (NotchOverlay routes outside-click to `dismissSettings()`).
@@ -24,6 +25,11 @@ struct SettingsView: View {
     /// they toggle the switch in System Settings, so a manual re-check covers
     /// the round-trip.
     @State private var axTrusted: Bool = TerminalFocus.isTrusted()
+    /// Login-item state is owned by the system (SMAppService), not
+    /// UserDefaults — read it on appear and after every toggle so the switch
+    /// stays honest even if the user flips it in System Settings.
+    @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+    @State private var launchAtLoginError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,13 +41,17 @@ struct SettingsView: View {
                     appearanceSection
                     integrationSection
                     systemAccessSection
+                    generalSection
                     aboutSection
                 }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 14)
             }
         }
-        .onAppear { axTrusted = TerminalFocus.isTrusted() }
+        .onAppear {
+            axTrusted = TerminalFocus.isTrusted()
+            launchAtLogin = LaunchAtLogin.isEnabled
+        }
     }
 
     // MARK: - Header
@@ -72,6 +82,50 @@ struct SettingsView: View {
         .padding(.horizontal, 18)
         .padding(.top, 14)
         .padding(.bottom, 10)
+    }
+
+    // MARK: - General
+
+    private var generalSection: some View {
+        SectionCard(title: "General") {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { newValue in
+                        do {
+                            try LaunchAtLogin.set(newValue)
+                            launchAtLoginError = nil
+                        } catch {
+                            launchAtLoginError = error.localizedDescription
+                        }
+                        // Re-read rather than trust newValue — registration
+                        // can be deferred or refused by the system.
+                        launchAtLogin = LaunchAtLogin.isEnabled
+                    }
+                )) {
+                    Text("Open at login")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.92))
+                }
+                .toggleStyle(.switch)
+                .tint(.blue)
+
+                Text("Start Notchcode automatically when you log in to this Mac.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let err = launchAtLoginError {
+                    Text(err)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.red.opacity(0.85))
+                        .lineLimit(3)
+                }
+            }
+            // Unlike the other cards, nothing in here has a Spacer() row to
+            // stretch the card — force full width to match.
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Usage tracking
