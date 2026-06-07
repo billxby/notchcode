@@ -6,9 +6,8 @@
 // the loopback marker "127.0.0.1:9876" inside any hook command. We don't
 // parse the full Claude Code hook schema — the marker is the contract.
 //
-// Flutter analogy: a small repository-style helper that wraps a tiny shell
-// out + a JSON read. State (`isInstalled`) is @Observable so the UI can
-// react when the user clicks Install and the file flips.
+// State (`isInstalled`) is @Observable so the UI can react when the user
+// clicks Install and the file flips.
 
 import Foundation
 import Observation

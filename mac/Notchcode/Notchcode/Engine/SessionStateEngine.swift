@@ -10,11 +10,6 @@
 //   3. NotchView reads `aggregateStatus` and `activeSessions` — @Observable
 //      auto-tracking re-renders on any mutation here.
 //
-// Architecture (Flutter analogy):
-//   - @Observable        ≈ Riverpod Notifier; reads inside `body` auto-subscribe
-//   - @MainActor         ≈ "this lives on the UI isolate"
-//   - shared singleton   ≈ a top-level provider, one per app
-//
 // State design:
 //   - `sessions` is the persistent dict; both pipelines mutate it.
 //   - Once a session shows up, it stays visible until the `claude` process it
@@ -314,6 +309,12 @@ final class SessionStateEngine {
             // The naming is confusing: "UserPromptSubmit" means the user
             // already submitted; from this moment forward Claude owns the turn.
             session.status = .working(tool: nil, detail: nil)
+            // The user JUST typed in the terminal running `claude`, so the
+            // frontmost app is the most reliable terminal capture we get —
+            // better than waiting for a PermissionRequest that may never
+            // fire (auto-approved sessions). Refresh on every submit: a
+            // resumed session (`claude -r`) can move to a different terminal.
+            session.terminalBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         case .permissionRequest:
             // Real "waiting on you" — Claude is paused, blocked on the user
             // approving a tool action. Stays waiting until the next

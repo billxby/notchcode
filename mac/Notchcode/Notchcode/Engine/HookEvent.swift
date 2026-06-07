@@ -9,9 +9,6 @@
 //   - clean test surface (we can construct fake events in unit tests later)
 //   - decouples wire format from internal model — if Anthropic renames a key,
 //     we adjust here, not in the engine
-//
-// Flutter analogy: this is the "DTO" — Data Transfer Object — that you'd use
-// at the network boundary before mapping into your domain model.
 
 import Foundation
 

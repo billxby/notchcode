@@ -163,6 +163,9 @@ struct SessionDetailView: View {
                             Text("End")
                                 .font(.system(size: 11, weight: .medium))
                         }
+                        // Light red rather than white — matches the session
+                        // rows' stop buttons; white-on-red was too harsh.
+                        .foregroundStyle(Color(red: 1.0, green: 0.62, blue: 0.6))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                     }

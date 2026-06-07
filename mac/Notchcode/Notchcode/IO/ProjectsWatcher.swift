@@ -9,10 +9,6 @@
 //     (`FSEventStreamCallback`) plus a void* `info` — same shape as POSIX
 //     callbacks. Swift exposes it raw, so this file looks more "C-ish" than
 //     anything else in the project.
-//
-// Flutter analogy: `Directory.watch()` returns a Stream<FileSystemEvent> that
-// abstracts platform differences. macOS uses FSEvents under the hood. We're
-// dropping below that abstraction so we can recurse and tune coalescing.
 
 import Foundation
 

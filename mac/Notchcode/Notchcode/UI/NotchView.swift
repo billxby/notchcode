@@ -252,7 +252,7 @@ struct NotchView: View {
                         if idx > 0 {
                             Divider().overlay(.white.opacity(0.08))
                         }
-                        SessionRow(session: session)
+                        SessionRow(session: session, engine: engine)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 overlay.showSessionDetail(id: session.id)
@@ -688,11 +688,16 @@ private struct PulsingDot: View {
 
 private struct SessionRow: View {
     let session: SessionStateEngine.Session
+    let engine: SessionStateEngine
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                StatusDot(status: session.status)
+                // Working sessions get the same live animation the resting
+                // pill uses (spinner/pulse/mascot per Settings) — a static
+                // dot undersold "Claude is actively doing something" in the
+                // expanded list. Other states keep the quiet color dot.
+                SessionStatusIndicator(status: session.status)
                 Text(session.project.isEmpty ? "(unknown)" : session.project)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.92))
@@ -722,16 +727,47 @@ private struct SessionRow: View {
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                 }
-            }
 
-            if case .waiting = session.status {
-                Button(action: focusTerminal) {
-                    Label("Focus terminal", systemImage: "arrow.up.right.square")
-                        .font(.system(size: 11, weight: .medium))
+                // Inline lifecycle controls — same actions as the drill-down
+                // header, surfaced here so multi-session users don't need a
+                // click-through per session. Buttons win the hit-test over
+                // the row's tap gesture, so the row still opens the detail
+                // view everywhere else.
+                if !session.ended, session.terminalBundleID != nil {
+                    RowIconButton(
+                        systemName: "apple.terminal",
+                        tint: isWaiting ? .yellow : .white.opacity(0.6),
+                        bg: isWaiting ? .yellow.opacity(0.18) : .white.opacity(0.08),
+                        action: focusTerminal
+                    )
+                    .help(isWaiting
+                          ? "Claude is waiting on you — focus its terminal"
+                          : "Focus the terminal that owns this session")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.yellow)
-                .controlSize(.small)
+                if session.ended {
+                    RowIconButton(
+                        systemName: "xmark",
+                        tint: .white.opacity(0.6),
+                        bg: .white.opacity(0.08)
+                    ) {
+                        engine.dismissSession(id: session.id)
+                    }
+                    .help("Drop this ended session from the panel")
+                } else {
+                    // Same treatment as the drill-down header's End button
+                    // (light-red glyph on red 0.22 capsule) so "end this
+                    // session" reads identically on both surfaces. The glyph
+                    // is a desaturated light red — full white-on-red was too
+                    // harsh against the dark panel.
+                    RowIconButton(
+                        systemName: "stop.fill",
+                        tint: Color(red: 1.0, green: 0.62, blue: 0.6),
+                        bg: .red.opacity(0.22)
+                    ) {
+                        engine.endSession(id: session.id)
+                    }
+                    .help("End this Claude Code session (SIGTERM)")
+                }
             }
 
             // Global view shows just the latest command per session — the full
@@ -745,6 +781,11 @@ private struct SessionRow: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .opacity(session.ended ? 0.5 : 1.0)
+    }
+
+    private var isWaiting: Bool {
+        if case .waiting = session.status { return true }
+        return false
     }
 
     private var statusText: String {
@@ -763,6 +804,50 @@ private struct SessionRow: View {
     private func focusTerminal() {
         guard let bundleID = session.terminalBundleID else { return }
         TerminalFocus.focus(bundleID: bundleID, projectHint: session.project)
+    }
+}
+
+/// Small circular icon button used by the session rows' inline controls.
+/// Mirrors the header gear's sizing so the right edge of the panel reads as
+/// one consistent family of tap targets.
+private struct RowIconButton: View {
+    let systemName: String
+    let tint: Color
+    let bg: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(bg))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Per-row status glyph. Working → the user-selected working animation
+/// (same component family as the pill's StatusIndicator, in Claude orange);
+/// every other state → the static color dot.
+private struct SessionStatusIndicator: View {
+    let status: SessionStateEngine.Status
+    @State private var settings = AppSettings.shared
+
+    var body: some View {
+        Group {
+            if case .working = status {
+                switch settings.workingAnimation {
+                case .spinner: ClaudeSpinner(color: .orange)
+                case .pulse:   ClaudePulse(color: .orange)
+                case .mascot:  ClaudeMascot(color: .orange)
+                }
+            } else {
+                StatusDot(status: status)
+            }
+        }
+        .frame(width: 14, height: 14)
     }
 }
 

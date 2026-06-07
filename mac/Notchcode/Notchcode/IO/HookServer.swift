@@ -10,13 +10,11 @@
 // the URL path, decode the JSON body, hand it to SessionStateEngine.
 //
 // Why hand-roll HTTP instead of pulling in a server library:
-//   - zero SPM dependencies (per project rule in notchcode-plan.md)
+//   - zero third-party dependencies is a project rule — every dependency is
+//     an install-time failure mode for a self-contained menu-bar app
 //   - the protocol surface we need is microscopic: one verb (POST), one
 //     route prefix (/hook/), small JSON bodies (< 8KB)
 //   - Network.framework's NWListener gives us the TCP plumbing for free
-//
-// Flutter analogy: imagine writing a `dart:io` HttpServer manually because
-// the project mandates no `package:shelf`. Same shape, different keywords.
 
 import Foundation
 import Network
