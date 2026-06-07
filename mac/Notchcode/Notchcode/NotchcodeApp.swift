@@ -3,9 +3,11 @@
 // items) declaratively and the framework wires up the lifecycle.
 //
 // We do NOT use a WindowGroup because Notchcode is a background agent: there
-// is no main window to open. Instead the only Scene is a MenuBarExtra (the
-// little icon in the top-right of the menu bar), and the actual UI lives on a
-// borderless NSPanel that we mount imperatively in init().
+// is no main window to open. There's no menubar icon either — the app lives
+// ENTIRELY on the notch (settings, hook install, quit are all inside the
+// notch UI). The App protocol requires at least one Scene, so we declare a
+// MenuBarExtra that is never inserted (`isInserted: .constant(false)`); the
+// real UI is a borderless NSPanel mounted imperatively in init().
 
 import SwiftUI
 import AppKit
@@ -42,51 +44,23 @@ struct NotchcodeApp: App {
         HookServer.shared.start(engine: SessionStateEngine.shared)
 
         // v0.8: detect whether Notchcode's hook entries are wired into
-        // ~/.claude/settings.json. Drives both the menubar action and the
-        // panel empty-state hint.
+        // ~/.claude/settings.json. Drives the panel empty-state hint and the
+        // settings page's integration section.
         HookInstaller.shared.refresh()
     }
 
     var body: some Scene {
-        // MenuBarExtra is SwiftUI's wrapper around NSStatusItem. The label
-        // and systemImage become the menubar icon; clicking it opens the menu.
-        // `.menu` style = classic dropdown (vs `.window` for popovers).
-        MenuBarExtra("Notchcode", systemImage: "circle.dotted") {
-            MenuBarContent()
+        // Placeholder scene, never shown. The App protocol demands a Scene,
+        // but every real surface (sessions, settings, hook install, quit)
+        // lives on the notch — a menubar icon would be a second, redundant
+        // home. `isInserted: .constant(false)` keeps the NSStatusItem out
+        // of the menubar entirely.
+        MenuBarExtra(
+            "Notchcode",
+            systemImage: "circle.dotted",
+            isInserted: .constant(false)
+        ) {
+            EmptyView()
         }
-        .menuBarExtraStyle(.menu)
-    }
-}
-
-/// Extracted so we can observe `HookInstaller.shared` and re-render the
-/// install/uninstall items based on current state.
-private struct MenuBarContent: View {
-    @State private var installer = HookInstaller.shared
-
-    var body: some View {
-        if installer.isInstalled {
-            Button("Reinstall Claude Code hooks") { installer.runInstaller() }
-                .disabled(installer.isWorking)
-            Button("Remove Claude Code hooks") { installer.runUninstaller() }
-                .disabled(installer.isWorking)
-        } else {
-            Button("Install Claude Code hooks…") { installer.runInstaller() }
-                .disabled(installer.isWorking)
-        }
-
-        Divider()
-
-        Button("Settings…") {
-            NotchOverlay.shared.showSettings()
-        }
-        .keyboardShortcut(",")
-
-        Divider()
-        Button("Quit Notchcode") {
-            // NSApplication.shared is the AppKit singleton. terminate(nil)
-            // posts the standard quit notification so any cleanup runs.
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")  // ⌘Q while the menu is open
     }
 }

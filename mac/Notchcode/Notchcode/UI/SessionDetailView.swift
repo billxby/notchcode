@@ -281,8 +281,7 @@ private struct MessageRow: View {
                     .foregroundStyle(.white.opacity(0.35))
                 Spacer()
             }
-            Text(message.text)
-                .font(.system(size: 12))
+            MarkdownText(text: message.text)
                 .foregroundStyle(.white.opacity(0.85))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -302,6 +301,188 @@ private struct MessageRow: View {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f.string(from: message.timestamp)
+    }
+}
+
+// MARK: - Markdown rendering
+
+/// Lightweight markdown renderer for chat turns.
+///
+/// Why not just `Text(message.text)`: a `String` variable renders verbatim —
+/// users see raw `**bold**` and backticks. Why not just
+/// `AttributedString(markdown:)`: Foundation's parser handles INLINE styles
+/// (bold, italic, `code`, links) but flattens BLOCK structure — code fences,
+/// lists, and headers all collapse into one run-on paragraph, which is most
+/// of what Claude actually writes.
+///
+/// So we split blocks ourselves (fenced code / headers / list items /
+/// paragraphs) and hand each block's text to the inline parser. Not a full
+/// CommonMark implementation — tables and blockquotes render as plain
+/// paragraphs — but it covers the real shape of Claude Code conversations.
+private struct MarkdownText: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Index-keyed ForEach is safe here: blocks are recomputed in full
+            // whenever `text` changes, never partially mutated.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+    }
+
+    // MARK: Block model
+
+    private enum Block {
+        case paragraph(String)
+        case header(String)
+        /// (marker, content) pairs — marker is "•" for unordered items or
+        /// the literal "3." for ordered ones.
+        case list([(marker: String, content: String)])
+        case code(String)
+    }
+
+    private var blocks: [Block] {
+        var result: [Block] = []
+        var paragraph: [String] = []
+        var listItems: [(marker: String, content: String)] = []
+        var codeLines: [String] = []
+        var inCode = false
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            result.append(.paragraph(paragraph.joined(separator: "\n")))
+            paragraph = []
+        }
+        func flushList() {
+            guard !listItems.isEmpty else { return }
+            result.append(.list(listItems))
+            listItems = []
+        }
+
+        for rawLine in text.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+            // Fence toggles win over everything else.
+            if line.hasPrefix("```") {
+                if inCode {
+                    result.append(.code(codeLines.joined(separator: "\n")))
+                    codeLines = []
+                    inCode = false
+                } else {
+                    flushParagraph(); flushList()
+                    inCode = true
+                }
+                continue
+            }
+            if inCode {
+                codeLines.append(rawLine)   // keep original indentation
+                continue
+            }
+
+            if line.isEmpty {
+                flushParagraph(); flushList()
+                continue
+            }
+
+            // Headers: "# " through "###### ", rendered uniformly — a chat
+            // bubble has no room for a six-level type scale.
+            if line.hasPrefix("#") {
+                let stripped = line.drop(while: { $0 == "#" })
+                if stripped.first == " " {
+                    flushParagraph(); flushList()
+                    result.append(.header(stripped.trimmingCharacters(in: .whitespaces)))
+                    continue
+                }
+            }
+
+            if let item = Self.listItem(from: line) {
+                flushParagraph()
+                listItems.append(item)
+                continue
+            }
+
+            flushList()
+            paragraph.append(line)
+        }
+
+        // Unterminated fence (mid-stream message) — show what we have.
+        if inCode && !codeLines.isEmpty {
+            result.append(.code(codeLines.joined(separator: "\n")))
+        }
+        flushParagraph(); flushList()
+        return result
+    }
+
+    /// "- x" / "* x" / "+ x" → ("•", "x");  "12. x" → ("12.", "x").
+    private static func listItem(from line: String) -> (marker: String, content: String)? {
+        for prefix in ["- ", "* ", "+ "] where line.hasPrefix(prefix) {
+            return ("•", String(line.dropFirst(prefix.count)))
+        }
+        let digits = line.prefix(while: \.isNumber)
+        if !digits.isEmpty, digits.count <= 3 {
+            let rest = line.dropFirst(digits.count)
+            if rest.hasPrefix(". ") {
+                return ("\(digits).", String(rest.dropFirst(2)))
+            }
+        }
+        return nil
+    }
+
+    // MARK: Block views
+
+    @ViewBuilder
+    private func blockView(_ block: Block) -> some View {
+        switch block {
+        case .paragraph(let s):
+            Text(inline(s))
+                .font(.system(size: 12))
+
+        case .header(let s):
+            Text(inline(s))
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.top, 2)
+
+        case .list(let items):
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(item.marker)
+                            .font(.system(size: 12, design: item.marker == "•" ? .default : .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text(inline(item.content))
+                            .font(.system(size: 12))
+                    }
+                }
+            }
+
+        case .code(let s):
+            // Verbatim — no inline parsing inside fences. ScrollView keeps
+            // long lines from blowing the bubble width.
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(s)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(0.05))
+            )
+        }
+    }
+
+    /// Inline markdown (bold / italic / `code` / links) via Foundation.
+    /// `.inlineOnlyPreservingWhitespace` keeps intra-paragraph newlines
+    /// instead of collapsing them. Falls back to the raw string on malformed
+    /// markdown — never drop user content.
+    private func inline(_ s: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: s,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(s)
     }
 }
 

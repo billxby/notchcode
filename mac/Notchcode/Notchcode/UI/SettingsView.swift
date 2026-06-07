@@ -344,9 +344,11 @@ struct SettingsView: View {
     private var aboutSection: some View {
         SectionCard(title: "About") {
             HStack(spacing: 10) {
-                Image(systemName: "circle.dotted")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white.opacity(0.8))
+                // The real app icon (from AppIcon.icns), not an SF Symbol —
+                // applicationIconImage already carries the rounded-rect mask.
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 30, height: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Notchcode")
                         .font(.system(size: 12, weight: .semibold))
@@ -361,6 +363,30 @@ struct SettingsView: View {
                     }
                 }
                 Spacer()
+                Link(destination: URL(string: "https://github.com/billxby/notchcode")!) {
+                    Text("GitHub")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                }
+                .help("github.com/billxby/notchcode")
+                // Quit lives here because Notchcode has no Dock icon and no
+                // main window — without this, the menubar extra is the only
+                // way out, and not everyone discovers it.
+                Button {
+                    NSApplication.shared.terminate(nil)
+                } label: {
+                    Text("Quit Notchcode")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help("Quit Notchcode (⌘Q from the menubar also works)")
             }
         }
     }
