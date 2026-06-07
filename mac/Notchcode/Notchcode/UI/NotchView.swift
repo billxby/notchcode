@@ -48,6 +48,19 @@ struct NotchView: View {
             case .sessionDetail:
                 SessionDetailView(engine: engine, overlay: overlay).transition(.opacity)
             }
+
+            // ⌘, opens settings while the notch UI is open (panel or session
+            // detail — settings itself already binds Escape to dismiss).
+            // Invisible anchor button rather than a modifier on the gear so
+            // one code path covers both modes.
+            if overlay.displayMode == .panel || overlay.displayMode == .sessionDetail {
+                Button("") { overlay.showSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+                    .buttonStyle(.plain)
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+            }
         }
         .ignoresSafeArea()
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: overlay.displayMode)
@@ -213,7 +226,7 @@ struct NotchView: View {
                     .background(Circle().fill(.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            .help("Settings")
+            .help("Settings (⌘,)")
         }
         .padding(.horizontal, 18)
         .padding(.top, 14)

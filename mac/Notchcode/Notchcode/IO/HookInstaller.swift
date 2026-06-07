@@ -124,9 +124,10 @@ final class HookInstaller {
 
     // MARK: - One-line install command (for users without the .app)
 
-    /// The post-launch curl one-liner. Hosted URL is a placeholder until v1.0
-    /// — for now the in-app "Install hooks…" menu item invokes the bundled
-    /// script directly, so this string is only for documentation/screenshots.
+    /// The public curl one-liner — serves the canonical script straight from
+    /// the repo, so there's a single source of truth with the bundled copy
+    /// the in-app "Install hooks…" button runs. Matching uninstaller lives at
+    /// the same path: .../Resources/uninstall-hooks.sh.
     static let oneLineInstallCommand =
-        "curl -fsSL https://notchcode.app/install-hooks.sh | bash"
+        "curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash"
 }

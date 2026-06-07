@@ -10,9 +10,9 @@
 //   - pure value types — easy to unit-test without standing up the engine
 //   - keeps SessionStateEngine focused on lifecycle, not arithmetic
 //
-// IMPORTANT: prices below are estimates and MUST be verified against
-// https://www.anthropic.com/pricing before the v1.0 launch. Inaccurate cost
-// figures undermine the whole "brake pedal" value prop.
+// Prices verified against platform.claude.com/docs/en/about-claude/models
+// on 2026-06-07. Re-check whenever Anthropic ships a new model family —
+// inaccurate cost figures undermine the whole "brake pedal" value prop.
 
 import Foundation
 
@@ -71,15 +71,18 @@ nonisolated enum CostTracker {
         let cacheRead: Double
     }
 
-    /// VERIFY BEFORE v1.0. Numbers below reflect the 4-family tiers; cache
+    /// Verified 2026-06-07 against Anthropic's models overview. Cache
     /// write/read are derived from the standard 1.25× / 2× / 0.1× multipliers.
+    /// Known approximation: Opus 4.1 and earlier were $15/$75, but they're
+    /// deprecated and effectively absent from Claude Code traffic, so all
+    /// "opus" matches use the Opus 4.5+ rates.
     static let pricingTable: [Model: Pricing] = [
         .opus4: Pricing(
-            input:        15.00,
-            output:       75.00,
-            cacheWrite5m: 18.75,
-            cacheWrite1h: 30.00,
-            cacheRead:     1.50
+            input:         5.00,
+            output:       25.00,
+            cacheWrite5m:  6.25,
+            cacheWrite1h: 10.00,
+            cacheRead:     0.50
         ),
         .sonnet4: Pricing(
             input:         3.00,
