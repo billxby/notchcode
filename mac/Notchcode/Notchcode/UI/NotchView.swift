@@ -8,9 +8,10 @@
 //   NotchOverlay.setSessionActivity) and shows ONLY the StatusIndicator —
 //   no text. The indicator's appearance follows engine.aggregateStatus
 //   (orange spinner working, pulsing yellow exclamation mark waiting,
-//   popping green checkmark done). While waiting, a jump arrow also grows
-//   on the trailing shoulder and the tap focuses the blocked session's
-//   terminal directly; otherwise tap opens the popover.
+//   popping green checkmark done — sticky until the first tap dismisses
+//   it). While waiting, a jump arrow also grows on the trailing shoulder
+//   and the tap focuses the blocked session's terminal directly; otherwise
+//   tap opens the popover.
 //
 //   PANEL:   the full popover. Shows active sessions with their current
 //   state + recent actions. Click outside (or tap the header) to collapse.
@@ -79,6 +80,15 @@ struct NotchView: View {
         .onChange(of: isWaiting) { _, waiting in
             if !waiting { terminalJumpConsumed = false }
         }
+        // Collapsing the panel-family modes while everything reads done
+        // counts as the acknowledgment — the user just had the full panel
+        // open; making them tap the checkmark again after that would nag.
+        // The pill's own first-tap acknowledge handles the resting case.
+        .onChange(of: overlay.displayMode) { old, new in
+            if old != .pill && new == .pill && isDone {
+                engine.acknowledgeDone()
+            }
+        }
         // Session live ↔ idle → widen/narrow the resting pill. At rest the
         // overlay matches the hardware cutout exactly; only a running Claude
         // Code session (or the brake) earns the extra shoulder width that
@@ -129,6 +139,12 @@ struct NotchView: View {
     /// focuses the blocked session's terminal — that's where the permission
     /// prompt lives. Any tap after that opens the panel as usual: the jump
     /// already happened, treat the affordance as dismissed.
+    ///
+    /// The done checkmark uses the same first-tap-consumes routing: it stays
+    /// pinned until the FIRST tap acknowledges it (pill contracts back to the
+    /// bare cutout), and only the next tap opens the panel. The persistent
+    /// checkmark is the "your task finished" reminder for anyone who wasn't
+    /// staring at the menubar when Stop fired.
     private var compact: some View {
         HStack(spacing: 0) {
             StatusIndicator(
@@ -153,10 +169,15 @@ struct NotchView: View {
             if isWaiting && !terminalJumpConsumed {
                 terminalJumpConsumed = true
                 focusWaitingTerminal()
+            } else if isDone {
+                // First tap = "seen it." The aggregate falls back to idle,
+                // hasLiveActivity flips, and the pill contracts on its own.
+                engine.acknowledgeDone()
             } else {
                 overlay.togglePanel()
             }
         }
+        .help(isDone ? "Task finished — click to dismiss" : "")
     }
 
     /// Pick the first session currently in `.waiting` and bring ITS terminal
@@ -385,6 +406,10 @@ struct NotchView: View {
 
     private var isWaiting: Bool {
         engine.aggregateStatus == .waiting
+    }
+
+    private var isDone: Bool {
+        engine.aggregateStatus == .done
     }
 
     /// "A Claude Code session is doing something worth showing." Idle

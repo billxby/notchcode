@@ -39,7 +39,7 @@ final class SessionStateEngine {
         /// argument is meaningful or the tool is unknown.
         case working(tool: String?, detail: String?)
         case waiting                  // permission requested — Claude blocked on user
-        case done                     // .Stop fired; transient (~2s) before idle
+        case done                     // .Stop fired; sticky until acknowledged (see acknowledgeDone)
         case error(String)
     }
 
@@ -330,8 +330,12 @@ final class SessionStateEngine {
                 session.terminalBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             }
         case .stop:
+            // Sticky by design: the checkmark persists until the user taps
+            // the pill (acknowledgeDone) or the session does new work. A 2s
+            // flash was trivially missed by anyone not staring at the menubar;
+            // a checkmark that waits to be dismissed doubles as the "your
+            // task finished, go look at it" reminder.
             session.status = .done
-            scheduleDecayToIdle(sessionId: id)
         }
 
         sessions[id] = session
@@ -401,6 +405,18 @@ final class SessionStateEngine {
         brakeDismissedAt = Date()
     }
 
+    /// The "I saw it" acknowledgment for the sticky done checkmark. Flips
+    /// every done session back to idle so the pill contracts. Fired by the
+    /// first tap on the pill while the checkmark shows (the second tap opens
+    /// the panel as usual), and when the panel collapses while everything
+    /// reads done — having the full panel open counts as seeing it.
+    func acknowledgeDone() {
+        for (id, var session) in sessions where session.status == .done {
+            session.status = .idle
+            sessions[id] = session
+        }
+    }
+
     // MARK: - Lifecycle controls (v0.95)
 
     /// User clicked End session in the drill-down. Sends SIGTERM to the
@@ -440,17 +456,19 @@ final class SessionStateEngine {
     /// they can see the project name and recent actions until they kill the
     /// terminal.
     ///
-    /// `staleTimeout` is a hard ceiling for *non-idle* sessions only: if a
+    /// `staleTimeout` is a hard ceiling for *mid-turn* sessions only: if a
     /// .working/.waiting session hasn't updated in 10 minutes, we assume
-    /// Claude Code crashed mid-turn without sending Stop. Idle sessions bypass
-    /// this — they're already done; only process death should hide them.
+    /// Claude Code crashed mid-turn without sending Stop. Idle and done
+    /// sessions bypass this — they completed cleanly; done in particular is
+    /// deliberately sticky (the checkmark must outlive any timeout until the
+    /// user acknowledges it), and only process death should hide either.
     ///
     /// The read of `clockTick` forces SwiftUI to re-call this as time passes.
     var activeSessions: [Session] {
         _ = clockTick
         let staleCutoff = Date().addingTimeInterval(-staleTimeout)
         return sessions.values.filter { session in
-            if session.status == .idle { return true }
+            if session.status == .idle || session.status == .done { return true }
             return session.lastUpdate >= staleCutoff
         }
     }
@@ -501,18 +519,6 @@ final class SessionStateEngine {
     }
 
     // MARK: - Internals
-
-    /// After a Stop, leave the "done" badge visible for 2s, then decay to idle.
-    private func scheduleDecayToIdle(sessionId: String) {
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard let self else { return }
-            if var s = self.sessions[sessionId], s.status == .done {
-                s.status = .idle
-                self.sessions[sessionId] = s
-            }
-        }
-    }
 
     /// Turn `/Users/you/notchcode` into `notchcode` for display. Full path
     /// decoding (slug → real path) lives in v0.6 popover.
