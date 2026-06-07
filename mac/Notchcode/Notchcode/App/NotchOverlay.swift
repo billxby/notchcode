@@ -2,8 +2,14 @@
 //
 // v0.7 has two visual modes:
 //
-//   - Pill:   resting strip — cutout + shoulder padding. Shoulders extend into
-//             the menubar, revealing the StatusIndicator. Always present.
+//   - Pill:   resting strip. At rest it matches the hardware cutout EXACTLY —
+//             zero extra width, visually indistinguishable from the bare
+//             notch. When a Claude Code session is live (aggregate status is
+//             non-idle), the pill widens by `shoulderPad` so the
+//             StatusIndicator becomes visible on the leading shoulder.
+//             Caveat: macOS has no API to reserve menubar space, so the
+//             widened shoulders can paint over menu titles of apps with
+//             many menus — accepted trade-off for the better look.
 //   - Panel:  large rounded rectangle — the popover, user-initiated by tap.
 //
 // The expansion is the same NSPanel resizing — NOT an NSPopover. This
@@ -20,13 +26,11 @@ final class NotchOverlay {
     static let shared = NotchOverlay()
 
     enum DisplayMode {
+        /// The resting strip. Covers the waiting state too: NotchView swaps
+        /// the indicator for an exclamation mark, grows an arrow on the
+        /// trailing shoulder, and routes the tap to the blocked session's
+        /// terminal — same frame, no extra chrome.
         case pill
-        /// Auto-engaged when aggregate status is `.waiting` and the user
-        /// hasn't already expanded into a larger mode. Slightly wider/taller
-        /// than `.pill` to fit a single "Open terminal" action so the user
-        /// can jump straight to the blocked Claude Code session — the
-        /// terminal owns the permission prompt itself.
-        case waitingPill
         case panel
         /// v0.9 — inline settings page. Same shape as `.panel` but routes
         /// to the settings UI. Entered by tapping the usage badge, exited
@@ -51,11 +55,25 @@ final class NotchOverlay {
 
     private var panel: NotchPanel?
     private var hosting: NSHostingView<NotchView>?
-    private var pillFrame: NSRect = .zero
-    private var waitingPillFrame: NSRect = .zero
+    /// Resting pill — the hardware cutout exactly. No shoulders, no extra
+    /// width; the overlay is invisible against the real notch.
+    private var restingPillFrame: NSRect = .zero
+    /// Active pill — cutout + shoulder padding, revealing the StatusIndicator.
+    /// Used only while a Claude Code session is live.
+    private var activePillFrame: NSRect = .zero
     private var panelFrame: NSRect = .zero
     private var settingsFrame: NSRect = .zero
     private var globalClickMonitor: Any?
+
+    /// Whether any Claude Code session is currently live (aggregate status
+    /// non-idle, or the brake is engaged). Drives which pill frame the
+    /// resting mode uses. Set by NotchView via `setSessionActivity(_:)`.
+    private(set) var sessionActive = false
+
+    /// The frame the `.pill` mode should occupy right now.
+    private var pillFrame: NSRect {
+        sessionActive ? activePillFrame : restingPillFrame
+    }
 
     private init() {}
 
@@ -83,27 +101,19 @@ final class NotchOverlay {
             print("[Notchcode] No hardware notch — using a virtual one at \(cutout).")
         }
 
-        // Pill frame — cutout plus shoulder padding so the concave shoulders
+        // Resting pill — the cutout exactly. The default look is "nothing is
+        // there": no widening unless a Claude Code session is live.
+        restingPillFrame = cutout
+
+        // Active pill — cutout plus shoulder padding so the concave shoulders
         // (and the StatusIndicator drawn at the leading edge) are visible
-        // alongside the menubar.
+        // alongside the menubar. Engaged only while a session is running.
         let shoulderPad: CGFloat = 80
-        pillFrame = NSRect(
+        activePillFrame = NSRect(
             x: cutout.minX - shoulderPad / 2,
             y: cutout.minY,
             width: cutout.width + shoulderPad,
             height: cutout.height
-        )
-
-        // Waiting-pill frame — same width as the resting pill (so it doesn't
-        // sweep out across the menubar), just drops downward to make room for
-        // a centered "Open terminal" button below the indicator. Reads as
-        // "the notch grew a chin", not "the notch grew an arm."
-        let waitingPillExtraHeight: CGFloat = 36
-        waitingPillFrame = NSRect(
-            x: pillFrame.minX,
-            y: pillFrame.maxY - (pillFrame.height + waitingPillExtraHeight),
-            width: pillFrame.width,
-            height: pillFrame.height + waitingPillExtraHeight
         )
 
         // Full popover panel — large rounded rectangle centered horizontally,
@@ -190,22 +200,22 @@ final class NotchOverlay {
 
     // MARK: - Mode transitions
 
-    /// Tap on the notch surface — toggles between the resting pill (or its
-    /// waitingPill variant) and the full popover.
+    /// Tap on the notch surface — toggles between the resting pill and the
+    /// full popover.
     func togglePanel() {
         let newMode: DisplayMode = (displayMode == .panel) ? .pill : .panel
         setMode(newMode)
     }
 
-    /// Auto-driven by NotchView when the aggregate status flips to/from
-    /// `.waiting` while the user is at rest. Only transitions between
-    /// `.pill` and `.waitingPill` — leaves panel/settings/drill-down alone
-    /// so the user's explicit expansion isn't yanked back.
-    func setWaitingExpansion(_ on: Bool) {
-        switch displayMode {
-        case .pill where on:         setMode(.waitingPill)
-        case .waitingPill where !on: setMode(.pill)
-        default: break
+    /// Auto-driven by NotchView when a Claude Code session starts/stops being
+    /// live. Swaps the resting pill between the exact-cutout frame and the
+    /// widened shoulder frame. Only animates when we're actually showing the
+    /// pill — other modes pick up the right frame on their next collapse.
+    func setSessionActivity(_ active: Bool) {
+        guard active != sessionActive else { return }
+        sessionActive = active
+        if displayMode == .pill {
+            animateFrame(to: pillFrame)
         }
     }
 
@@ -245,18 +255,13 @@ final class NotchOverlay {
         let target: NSRect = {
             switch newMode {
             case .pill:          return pillFrame
-            case .waitingPill:   return waitingPillFrame
             case .panel:         return panelFrame
             case .settings:      return settingsFrame
             case .sessionDetail: return panelFrame   // same shape, different content
             }
         }()
 
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.32
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel?.animator().setFrame(target, display: true)
-        }
+        animateFrame(to: target)
 
         // Outside-click dismiss for the panel-family modes. The permission
         // prompt is modal-flavored — must be resolved via the buttons.
@@ -264,6 +269,16 @@ final class NotchOverlay {
             startMonitoringOutsideClicks()
         } else {
             stopMonitoringOutsideClicks()
+        }
+    }
+
+    /// Shared spring-ish ease for every frame change — mode transitions and
+    /// the rest ↔ active pill widening alike.
+    private func animateFrame(to target: NSRect) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.32
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel?.animator().setFrame(target, display: true)
         }
     }
 

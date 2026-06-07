@@ -23,7 +23,8 @@
 //     while the terminal is still alive.
 //   - A 1-second `clockTick` forces SwiftUI to re-evaluate computed properties
 //     as time passes. @Observable tracks property reads, not wall-clock time —
-//     without this tick, time-sensitive UI (e.g. "Resets in 4h 23m") wouldn't redraw.
+//     without this tick, time-sensitive UI (e.g. action timestamps, usage
+//     windows rolling over) wouldn't redraw.
 
 import Foundation
 import Observation
@@ -110,96 +111,117 @@ final class SessionStateEngine {
     /// can show "12 sessions today" later — they just don't affect aggregate.
     private(set) var sessions: [String: Session] = [:]
 
-    // MARK: - v0.7 redux: usage state (5-hour rolling token window)
+    // MARK: - Usage state (rolling 7-day token window)
+    //
+    // v1.0 redesign: we no longer try to model Anthropic's 5-hour session
+    // blocks. The block anchor can only be inferred from events we happen to
+    // see locally, so the derived "resets in" time and %-of-plan were wrong
+    // whenever the user worked from another device or the app missed events.
+    // Instead we report what we can actually measure: exact token counts
+    // from this Mac's JSONLs, over windows with no hidden anchor — a rolling
+    // 7 days (primary) and the current calendar day. The brake compares the
+    // weekly total against a USER-SET budget, not a guessed plan limit.
 
-    /// One observed assistant-message worth of usage, timestamped. The engine
-    /// keeps a flat list and prunes events older than `windowSeconds` —
-    /// the same 5-hour "session block" model Anthropic surfaces in their
-    /// own UI ("Resets in 4 hr 23 min").
+    /// One observed assistant-message worth of usage, timestamped.
     struct UsageEvent: Equatable {
         let sessionId: String
-        let tokens: Int       // sum of input + output + cache_create + cache_read
-        let usd: Double       // 0 unless API tier
+        let tokens: Int       // input + output + cache_create (NOT cache_read)
+        let usd: Double       // API-rate equivalent
         let at: Date
     }
 
-    /// Rolling buffer of all events in (now - windowSeconds, now]. Order is
+    /// Rolling buffer of all events in (now - weekSeconds, now]. Order is
     /// insertion order (≈ chronological). Pruned lazily on each access.
     private var usageBuffer: [UsageEvent] = []
-    nonisolated static let windowSeconds: TimeInterval = 5 * 60 * 60   // 5h, matches Anthropic's session reset
+    nonisolated static let weekSeconds: TimeInterval = 7 * 24 * 60 * 60
 
-    /// v0.95 fix — start of the current Anthropic 5-hour session block. The
-    /// real model is a FIXED block (not a sliding window): a block starts
-    /// on the first message after a ≥5h idle gap, lasts exactly 5h, and the
-    /// next message after that starts block 2. The prior implementation
-    /// derived "resets in" from the oldest event in the buffer, which is
-    /// correct only for the first block — for continuous multi-block usage
-    /// it perpetually reported "resets in ~5h."
-    ///
-    /// Updated by `advanceBlockAnchor(at:)` on every recorded event; reset
-    /// implicitly when `now - currentBlockStart >= 5h` (the block expires
-    /// and we wait for a new event to start the next one).
-    private(set) var currentBlockStart: Date? = nil
+    /// Running totals over the buffer — incremented in `recordUsage`,
+    /// decremented in `pruneExpired` as events age out. Kept as counters
+    /// because the clockTick-driven computed properties re-evaluate every
+    /// second; reducing a week's worth of events each tick is too hot.
+    private var weeklyTokensTotal: Int = 0
+    private var weeklyDollarsTotal: Double = 0
 
-    /// Total tokens observed inside the rolling window. Drives the badge
-    /// and the brake threshold check.
-    var tokensInWindow: Int {
+    /// Tokens observed in the last 7 days. Drives the badge and (against the
+    /// user's weekly budget) the brake threshold check.
+    var weeklyTokens: Int {
         _ = clockTick
         pruneExpired()
-        return usageBuffer.reduce(0) { $0 + $1.tokens }
+        return weeklyTokensTotal
     }
 
-    /// Dollar total in the rolling window. Meaningful only for `.api` tier;
-    /// shown as informational ("≈$X if billed at API rates") for everyone else.
-    var dollarsInWindow: Double {
+    /// API-rate dollar total over the last 7 days. Informational for
+    /// subscription tiers ("≈$X if billed at API rates").
+    var weeklyDollars: Double {
         _ = clockTick
         pruneExpired()
-        return usageBuffer.reduce(0) { $0 + $1.usd }
+        return weeklyDollarsTotal
     }
 
-    /// Seconds until the current 5h session block resets. Anchored on the
-    /// FIRST message of the block (Anthropic's actual semantics), not on
-    /// the oldest event in a sliding 5h window. Returns 0 when no block is
-    /// active OR the block has expired (next message will start a new one).
-    var secondsUntilReset: TimeInterval {
+    /// Tokens observed today (calendar day, local time). Walks the buffer
+    /// from the back and stops at the first pre-midnight event, so the cost
+    /// scales with today's activity, not the whole week.
+    var todayTokens: Int {
         _ = clockTick
         pruneExpired()
-        guard let bs = currentBlockStart else { return 0 }
-        return max(0, Self.windowSeconds - Date().timeIntervalSince(bs))
-    }
-
-    /// 0…1 fraction of the active plan's session limit consumed.
-    /// > 1.0 is possible (you blew through the estimate); UI caps display at 100%.
-    var usageFraction: Double {
-        let tier = AppSettings.shared.planTier
-        guard !tier.usesDollarBudget else {
-            // Dollar mode: fraction = $window / dailyCap. Window != day here,
-            // but conveys "how hot are you running" with reasonable accuracy.
-            let cap = AppSettings.shared.dailyCapUSD
-            return cap > 0 ? dollarsInWindow / cap : 0
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        var total = 0
+        for ev in usageBuffer.reversed() {
+            if ev.at < startOfDay { break }
+            total += ev.tokens
         }
-        let limit = Double(tier.sessionTokenLimit)
-        return limit > 0 ? Double(tokensInWindow) / limit : 0
+        return total
+    }
+
+    /// API-rate dollars spent today. The primary metric for `.api` tier —
+    /// matches the "Daily $ cap" setting's actual semantics.
+    var dollarsToday: Double {
+        _ = clockTick
+        pruneExpired()
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        var total: Double = 0
+        for ev in usageBuffer.reversed() {
+            if ev.at < startOfDay { break }
+            total += ev.usd
+        }
+        return total
+    }
+
+    /// 0…1 fraction of the user's budget consumed. API tier: $ today vs the
+    /// daily cap. Subscription: weekly tokens vs the user-set weekly budget.
+    /// > 1.0 is possible (you blew through the budget); UI caps display at 100%.
+    var usageFraction: Double {
+        let settings = AppSettings.shared
+        if settings.planTier.usesDollarBudget {
+            let cap = settings.dailyCapUSD
+            return cap > 0 ? dollarsToday / cap : 0
+        }
+        let budget = Double(settings.weeklyTokenBudget)
+        return budget > 0 ? Double(weeklyTokens) / budget : 0
     }
 
     /// True once usageFraction crosses the user-set threshold AND the user
-    /// hasn't dismissed for this window.
+    /// hasn't dismissed today.
     private var brakeDismissedAt: Date? = nil
     var brakeEngaged: Bool {
         _ = clockTick
         guard AppSettings.shared.usageTrackingEnabled else { return false }
+        // "Dismiss for today" — quiet until the calendar day rolls over.
         if let dismissedAt = brakeDismissedAt,
-           Date().timeIntervalSince(dismissedAt) < Self.windowSeconds {
+           Calendar.current.isDate(dismissedAt, inSameDayAs: Date()) {
             return false
         }
         return usageFraction >= AppSettings.shared.brakeThresholdPercent
     }
 
-    /// Drop events older than `windowSeconds`. Called from every reader so
-    /// the buffer stays bounded without a separate timer.
+    /// Drop events older than `weekSeconds`, keeping the running totals in
+    /// sync. Called from every reader so the buffer stays bounded without a
+    /// separate timer.
     private func pruneExpired() {
-        let cutoff = Date().addingTimeInterval(-Self.windowSeconds)
+        let cutoff = Date().addingTimeInterval(-Self.weekSeconds)
         while let first = usageBuffer.first, first.at < cutoff {
+            weeklyTokensTotal -= first.tokens
+            weeklyDollarsTotal -= first.usd
             usageBuffer.removeFirst()
         }
     }
@@ -314,30 +336,19 @@ final class SessionStateEngine {
         sessions[id] = session
     }
 
-    // MARK: - v0.7 redux: usage ingestion
-
-    /// Advance the 5h block anchor by one event timestamp. Public so the
-    /// catch-up path in ProjectsWatcher can sort events chronologically
-    /// across files and replay timestamps in order before any events land
-    /// in the buffer — the state machine depends on monotonic input.
-    ///
-    /// Rule: a new event at `date` opens a NEW block (anchor reset) if
-    /// there's no anchor yet OR the event landed at-or-after the current
-    /// anchor + 5h. Otherwise we stay inside the current block.
-    func advanceBlockAnchor(at date: Date) {
-        if let anchor = currentBlockStart {
-            if date.timeIntervalSince(anchor) >= Self.windowSeconds {
-                currentBlockStart = date
-            }
-        } else {
-            currentBlockStart = date
-        }
-    }
+    // MARK: - Usage ingestion
 
     /// Called by ProjectsWatcher for each parsed assistant message. Appends
     /// to the rolling window AND updates per-session running totals. Caller
     /// is responsible for not double-counting (JSONLParser handles that via
     /// per-file byte offsets).
+    ///
+    /// Session-row gating: the weekly catch-up replays up to 7 days of
+    /// history, and we don't want a launch to resurrect a week of dead
+    /// sessions in the panel. Usage always lands in the buffer; the
+    /// per-session cost only updates sessions that already exist or whose
+    /// event is recent enough to be a live session (the hooks/file-watcher
+    /// create the row within seconds for anything actually running).
     func recordUsage(
         sessionId: String,
         project: String,
@@ -345,16 +356,15 @@ final class SessionStateEngine {
         usd: Double,
         at date: Date = .now
     ) {
-        advanceBlockAnchor(at: date)
-
         // Buffer is event-level; bounded by pruneExpired() on every read.
         usageBuffer.append(UsageEvent(sessionId: sessionId, tokens: tokens, usd: usd, at: date))
+        weeklyTokensTotal += tokens
+        weeklyDollarsTotal += usd
 
-        var session = sessions[sessionId] ?? Session(
-            id: sessionId,
-            project: project,
-            lastUpdate: date
-        )
+        let isRecent = Date().timeIntervalSince(date) < staleTimeout
+        guard var session = sessions[sessionId]
+            ?? (isRecent ? Session(id: sessionId, project: project, lastUpdate: date) : nil)
+        else { return }
         if !project.isEmpty { session.project = project }
         session.costUSD += usd
         sessions[sessionId] = session
@@ -363,6 +373,8 @@ final class SessionStateEngine {
     /// v0.95 — append a parsed text message to the session's rolling buffer.
     /// Capped at `messageHistoryLimit`; oldest entries evicted FIFO. Caller
     /// is responsible for de-duping via JSONLParser's per-file byte cursor.
+    /// Same session-row gating as `recordUsage` — week-old transcripts
+    /// shouldn't materialize dead sessions in the panel.
     func recordMessage(
         sessionId: String,
         project: String,
@@ -370,11 +382,10 @@ final class SessionStateEngine {
         text: String,
         at date: Date = .now
     ) {
-        var session = sessions[sessionId] ?? Session(
-            id: sessionId,
-            project: project,
-            lastUpdate: date
-        )
+        let isRecent = Date().timeIntervalSince(date) < staleTimeout
+        guard var session = sessions[sessionId]
+            ?? (isRecent ? Session(id: sessionId, project: project, lastUpdate: date) : nil)
+        else { return }
         if !project.isEmpty { session.project = project }
         session.messages.append(Message(role: role, text: text, timestamp: date))
         if session.messages.count > Self.messageHistoryLimit {
@@ -383,8 +394,8 @@ final class SessionStateEngine {
         sessions[sessionId] = session
     }
 
-    /// User clicked "Dismiss for this window" — quiet the brake until the
-    /// rolling 5-hour window naturally rolls over.
+    /// User clicked "Dismiss for today" — quiet the brake until the calendar
+    /// day rolls over.
     func dismissBrake() {
         brakeDismissedAt = Date()
     }

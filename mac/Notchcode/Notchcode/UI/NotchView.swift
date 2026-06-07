@@ -2,10 +2,15 @@
 //
 // v0.7 has two modes matching NotchOverlay.DisplayMode:
 //
-//   PILL:    resting strip. Shows ONLY the StatusIndicator — no text. The
-//   indicator's appearance follows engine.aggregateStatus (gray idle, blue
-//   spinner working, pulsing yellow waiting, popping green checkmark done).
-//   Tap to open the popover.
+//   PILL:    resting strip. At rest (no live session) the frame matches the
+//   hardware cutout exactly and renders nothing — the notch looks stock.
+//   When a Claude Code session is live, the overlay widens (see
+//   NotchOverlay.setSessionActivity) and shows ONLY the StatusIndicator —
+//   no text. The indicator's appearance follows engine.aggregateStatus
+//   (orange spinner working, pulsing yellow exclamation mark waiting,
+//   popping green checkmark done). While waiting, a jump arrow also grows
+//   on the trailing shoulder and the tap focuses the blocked session's
+//   terminal directly; otherwise tap opens the popover.
 //
 //   PANEL:   the full popover. Shows active sessions with their current
 //   state + recent actions. Click outside (or tap the header) to collapse.
@@ -22,6 +27,12 @@ struct NotchView: View {
     let overlay: NotchOverlay
     @State private var installer = HookInstaller.shared
     @State private var settings = AppSettings.shared
+    /// One terminal jump per waiting episode. The FIRST tap while waiting
+    /// focuses the blocked session's terminal; after that the affordance is
+    /// considered dismissed — the arrow hides and taps open the panel as
+    /// usual. Reset when the waiting episode ends so the next one gets a
+    /// fresh jump.
+    @State private var terminalJumpConsumed = false
 
     var body: some View {
         ZStack {
@@ -32,8 +43,6 @@ struct NotchView: View {
                 expanded.transition(.opacity)
             case .pill:
                 compact.transition(.opacity)
-            case .waitingPill:
-                waitingCompact.transition(.opacity)
             case .settings:
                 SettingsView(overlay: overlay).transition(.opacity)
             case .sessionDetail:
@@ -52,11 +61,20 @@ struct NotchView: View {
                 overlay.expandForBrake()
             }
         }
-        // Waiting → auto-expand the resting knob to surface "Open terminal".
-        // Only toggles between .pill ↔ .waitingPill — other modes are left
-        // alone so an open panel / settings / drill-down isn't yanked back.
+        // Waiting episode ended → re-arm the one-shot terminal jump for the
+        // next time Claude blocks on the user.
         .onChange(of: isWaiting) { _, waiting in
-            overlay.setWaitingExpansion(waiting)
+            if !waiting { terminalJumpConsumed = false }
+        }
+        // Session live ↔ idle → widen/narrow the resting pill. At rest the
+        // overlay matches the hardware cutout exactly; only a running Claude
+        // Code session (or the brake) earns the extra shoulder width that
+        // makes the StatusIndicator visible.
+        .onChange(of: hasLiveActivity) { _, active in
+            overlay.setSessionActivity(active)
+        }
+        .onAppear {
+            overlay.setSessionActivity(hasLiveActivity)
         }
     }
 
@@ -93,6 +111,11 @@ struct NotchView: View {
 
     // MARK: - Pill layout — indicator only, no text.
 
+    /// While waiting on the user, the indicator becomes an exclamation mark
+    /// and a jump arrow grows in on the trailing shoulder. The FIRST tap
+    /// focuses the blocked session's terminal — that's where the permission
+    /// prompt lives. Any tap after that opens the panel as usual: the jump
+    /// already happened, treat the affordance as dismissed.
     private var compact: some View {
         HStack(spacing: 0) {
             StatusIndicator(
@@ -100,65 +123,26 @@ struct NotchView: View {
                 workingTint: .orange,
                 forceColor: engine.brakeEngaged ? .orange : nil
             )
-            // Brake state: tight breathing halo around the dot only. Drawn
-            // here (not on the outer HStack) so it doesn't fill the entire
-            // pill with an orange rectangle.
-            .overlay {
-                if engine.brakeEngaged {
-                    BrakePulse()
-                        .allowsHitTesting(false)
-                }
-            }
             Spacer(minLength: 0)
+            if isWaiting && !terminalJumpConsumed {
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.yellow)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .help("Focus the terminal Claude Code is waiting on")
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 4)
-        .scaleEffect(isWaiting ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.18), value: terminalJumpConsumed)
         .contentShape(Rectangle())
         .onTapGesture {
-            overlay.togglePanel()
-        }
-    }
-
-    // MARK: - Waiting pill — dot + "Open terminal" action
-
-    /// Compact-but-actionable knob shown when any session is blocked on a
-    /// permission prompt. Tapping the empty area still toggles the full
-    /// panel; the button itself short-circuits to focus the waiting
-    /// session's terminal so the user can answer Claude immediately.
-    private var waitingCompact: some View {
-        VStack(spacing: 4) {
-            // Top row mirrors the resting pill exactly — indicator anchored
-            // to the leading edge over the notch shoulder. Keeps the visual
-            // identity continuous when expanding/contracting.
-            HStack(spacing: 0) {
-                StatusIndicator(status: engine.aggregateStatus, workingTint: .orange)
-                Spacer(minLength: 0)
+            if isWaiting && !terminalJumpConsumed {
+                terminalJumpConsumed = true
+                focusWaitingTerminal()
+            } else {
+                overlay.togglePanel()
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 4)
-
-            // Centered chin button hanging below the indicator.
-            Button(action: focusWaitingTerminal) {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.up.right.square")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Open terminal")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundStyle(.black.opacity(0.85))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(.yellow.opacity(0.95)))
-            }
-            .buttonStyle(.plain)
-            .help("Focus the terminal Claude Code is waiting on")
-            .padding(.bottom, 6)
-        }
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            overlay.togglePanel()
         }
     }
 
@@ -200,16 +184,17 @@ struct NotchView: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.92))
             Spacer()
-            if settings.usageTrackingEnabled && (engine.tokensInWindow > 0 || engine.dollarsInWindow > 0) {
+            if settings.usageTrackingEnabled && (engine.weeklyTokens > 0 || engine.dollarsToday > 0) {
                 Button {
                     overlay.showSettings()
                 } label: {
                     UsageBadge(
                         tier: settings.planTier,
-                        tokens: engine.tokensInWindow,
-                        usd: engine.dollarsInWindow,
+                        weeklyTokens: engine.weeklyTokens,
+                        todayTokens: engine.todayTokens,
+                        weeklyUSD: engine.weeklyDollars,
+                        usdToday: engine.dollarsToday,
                         fraction: engine.usageFraction,
-                        secondsLeft: engine.secondsUntilReset,
                         braked: engine.brakeEngaged
                     )
                 }
@@ -265,65 +250,59 @@ struct NotchView: View {
         }
     }
 
-    // MARK: - Brake pedal (v0.7 redux)
+    // MARK: - Brake pedal
 
-    /// Fires when usageFraction crosses the threshold. Phrased as an
-    /// approximation — the limits aren't published by Anthropic.
+    /// Fires when usageFraction crosses the threshold. Styled as a quiet
+    /// inline strip — same typography and hairline dividers as the session
+    /// list, just an orange dot for color — rather than a callout card. The
+    /// one-time auto-expand already grabbed the user's attention; the strip
+    /// only needs to persist the fact.
     private var brakeBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.octagon.fill")
-                    .foregroundStyle(.orange)
                 Text(brakeTitle)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.95))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
                 Spacer()
                 Text(brakeSubtitle)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.45))
+                Button {
+                    engine.dismissBrake()
+                } label: {
+                    Text("Dismiss")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help("Quiet this until tomorrow")
             }
-            Text("Approximate — Anthropic doesn't publish exact limits.")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.5))
-            Button {
-                engine.dismissBrake()
-            } label: {
-                Text("Dismiss for this window")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange.opacity(0.85))
-            .controlSize(.small)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 9)
+            .help(settings.planTier.usesDollarBudget
+                  ? "Measured against your daily $ cap from Settings."
+                  : "Budget is your own gauge — adjust it in Settings.")
+
+            Divider().overlay(.white.opacity(0.08))
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.orange.opacity(0.18))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.orange.opacity(0.4), lineWidth: 1)
-        )
-        .padding(.horizontal, 14)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
     }
 
     private var brakeTitle: String {
         if settings.planTier.usesDollarBudget {
             return "Approaching daily API budget"
         }
-        return "Approaching session limit"
+        return "Approaching weekly budget"
     }
 
     private var brakeSubtitle: String {
         let pct = Int((engine.usageFraction * 100).rounded())
         if settings.planTier.usesDollarBudget {
-            return String(format: "≈$%.2f spent · %d%%", engine.dollarsInWindow, pct)
+            return String(format: "≈$%.2f today · %d%%", engine.dollarsToday, pct)
         }
-        return "\(pct)% of \(settings.planTier.displayName)"
+        return "\(compactTokenCount(engine.weeklyTokens)) of \(compactTokenCount(settings.weeklyTokenBudget)) · \(pct)%"
     }
 
     // MARK: - Empty-state branches
@@ -395,6 +374,13 @@ struct NotchView: View {
         engine.aggregateStatus == .waiting
     }
 
+    /// "A Claude Code session is doing something worth showing." Idle
+    /// sessions don't count — the pill stays at hardware-notch size until
+    /// real activity (working/waiting/done/error) or the brake shows up.
+    private var hasLiveActivity: Bool {
+        engine.aggregateStatus != .idle || engine.brakeEngaged
+    }
+
     private var headerLabel: String {
         let n = engine.activeSessions.count
         if n == 0 { return "Notchcode" }
@@ -420,7 +406,10 @@ private struct StatusIndicator: View {
     var body: some View {
         Group {
             if let forced = forceColor {
-                PulsingDot(color: forced)
+                // Brake state: a plain static dot. Deliberately quiet — the
+                // user already got the one-time auto-expanded banner; the
+                // resting pill just needs to hold the color, not nag.
+                Dot(color: forced)
             } else {
                 switch status {
                 case .idle:    EmptyView()
@@ -430,7 +419,7 @@ private struct StatusIndicator: View {
                     case .pulse:   ClaudePulse(color: workingTint)
                     case .mascot:  ClaudeMascot(color: workingTint)
                     }
-                case .waiting: PulsingDot(color: .yellow)
+                case .waiting: WaitingExclamation()
                 case .done:    CheckmarkBadge()
                 case .error:   Dot(color: .red)
                 }
@@ -554,61 +543,66 @@ private struct ClaudePulse: View {
     }
 }
 
-// MARK: - Usage badge (v0.7 redux)
+// MARK: - Usage badge
 
-/// Session-block usage pill in the expanded panel header. Renders differently
-/// per plan tier:
-///   - API mode: dollar value (real money)
-///   - Anything else: percentage of estimated session limit, prefixed "~"
-///     so users see at a glance that this is an approximation
+/// Compact token-count formatter shared by the badge, brake banner, and
+/// settings page: 950 → "950", 8_234_000 → "8.2M", 1_050_000_000 → "1.1B".
+/// Whole multiples drop the ".0" ("50M", not "50.0M").
+func compactTokenCount(_ n: Int) -> String {
+    func fmt(_ value: Double, _ suffix: String) -> String {
+        let s = String(format: "%.1f", value)
+        return (s.hasSuffix(".0") ? String(s.dropLast(2)) : s) + suffix
+    }
+    let d = Double(n)
+    switch d {
+    case 1_000_000_000...: return fmt(d / 1_000_000_000, "B")
+    case 1_000_000...:     return fmt(d / 1_000_000, "M")
+    case 1_000...:         return fmt(d / 1_000, "K")
+    default:               return "\(n)"
+    }
+}
+
+/// Usage pill in the expanded panel header. Renders differently per tier:
+///   - API mode: dollars spent today (real money, measured vs the daily cap)
+///   - Subscription: exact tokens used in the last 7 days on this Mac,
+///     e.g. "8.2M wk". No reset countdown — Anthropic's window anchors
+///     can't be known locally, so we don't pretend to know them.
 private struct UsageBadge: View {
     let tier: AppSettings.PlanTier
-    let tokens: Int
-    let usd: Double
+    let weeklyTokens: Int
+    let todayTokens: Int
+    let weeklyUSD: Double
+    let usdToday: Double
     let fraction: Double
-    let secondsLeft: TimeInterval
     let braked: Bool
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(primaryLabel)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            if secondsLeft > 0 {
-                Text("·")
-                    .foregroundStyle(textColor.opacity(0.5))
-                Text(resetLabel)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(textColor.opacity(0.7))
-            }
-        }
-        .foregroundStyle(textColor)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(bgColor))
-        .help(helpText)
+        Text(primaryLabel)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundStyle(textColor)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(bgColor))
+            .help(helpText)
     }
 
     private var primaryLabel: String {
         if tier.usesDollarBudget {
-            return usd < 10 ? String(format: "$%.2f", usd) : String(format: "$%.0f", usd)
+            return usdToday < 10 ? String(format: "$%.2f", usdToday) : String(format: "$%.0f", usdToday)
         }
-        let pct = Int((fraction * 100).rounded())
-        return "~\(pct)%"
-    }
-
-    private var resetLabel: String {
-        let mins = Int(secondsLeft / 60)
-        if mins >= 60 {
-            return "\(mins / 60)h \(mins % 60)m"
-        }
-        return "\(mins)m"
+        return "\(compactTokenCount(weeklyTokens)) wk"
     }
 
     private var helpText: String {
         if tier.usesDollarBudget {
-            return "≈\(usd) spent in the last 5 hours at API rates."
+            return String(format: "≈$%.2f spent today at API rates (%d%% of your daily cap).",
+                          usdToday, Int((fraction * 100).rounded()))
         }
-        return "Approximate share of your \(tier.displayName) 5-hour session limit. Anthropic doesn't publish exact limits — this is a community-derived estimate."
+        let pct = Int((fraction * 100).rounded())
+        return "\(compactTokenCount(weeklyTokens)) tokens in the last 7 days on this Mac"
+             + " · \(compactTokenCount(todayTokens)) today"
+             + String(format: " · ≈$%.0f at API rates.", weeklyUSD)
+             + " \(pct)% of your \(compactTokenCount(AppSettings.shared.weeklyTokenBudget)) weekly budget."
     }
 
     private var bgColor: Color {
@@ -643,6 +637,24 @@ private struct Dot: View {
     var body: some View { Circle().fill(color).frame(width: 8, height: 8) }
 }
 
+/// Waiting on the user — bold yellow exclamation mark with a gentle opacity
+/// pulse. Replaces the old pulsing dot: an "!" reads as "action needed" at a
+/// glance, where a dot just reads as "something is happening."
+private struct WaitingExclamation: View {
+    @State private var pulsed = false
+    var body: some View {
+        Image(systemName: "exclamationmark")
+            .font(.system(size: 12, weight: .heavy))
+            .foregroundStyle(.yellow)
+            .opacity(pulsed ? 0.45 : 1.0)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
+                    pulsed = true
+                }
+            }
+    }
+}
+
 private struct PulsingDot: View {
     let color: Color
     @State private var pulsed = false
@@ -656,32 +668,6 @@ private struct PulsingDot: View {
                     pulsed = true
                 }
             }
-    }
-}
-
-/// Tight breathing orange halo around the status dot when the brake is engaged.
-/// A faint inner fill plus an outer ring that scales 1.0 ↔ 1.8 while fading.
-/// Sized to overlay the 14pt StatusIndicator — no stretched capsule across
-/// the whole pill.
-private struct BrakePulse: View {
-    @State private var breathing = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.orange, lineWidth: 1.5)
-                .opacity(breathing ? 0.0 : 0.7)
-                .scaleEffect(breathing ? 1.8 : 1.0)
-            Circle()
-                .fill(Color.orange.opacity(0.22))
-                .scaleEffect(breathing ? 1.1 : 0.9)
-        }
-        .frame(width: 18, height: 18)
-        .onAppear {
-            withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) {
-                breathing = true
-            }
-        }
     }
 }
 

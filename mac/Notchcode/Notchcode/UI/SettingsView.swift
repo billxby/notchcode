@@ -130,13 +130,36 @@ struct SettingsView: View {
                         .disabled(!settings.usageTrackingEnabled)
                     }
                 } else {
+                    // Weekly token budget — what the badge color and the
+                    // brake measure against. Seeded by the tier preset above;
+                    // fully user-editable. Coarser steps at higher budgets so
+                    // a Max 20× user isn't clicking through 200 stops.
+                    HStack {
+                        Text("Weekly budget")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.75))
+                        Spacer()
+                        Stepper {
+                            Text("\(compactTokenCount(settings.weeklyTokenBudget)) tokens")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .frame(width: 90, alignment: .trailing)
+                        } onIncrement: {
+                            settings.weeklyTokenBudget += budgetStep(settings.weeklyTokenBudget)
+                        } onDecrement: {
+                            let step = budgetStep(settings.weeklyTokenBudget - 1)
+                            settings.weeklyTokenBudget = max(1_000_000, settings.weeklyTokenBudget - step)
+                        }
+                        .disabled(!settings.usageTrackingEnabled)
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("Brake fires at")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.white.opacity(0.75))
                             Spacer()
-                            Text("\(Int(settings.brakeThresholdPercent * 100))%")
+                            Text("\(Int(settings.brakeThresholdPercent * 100))% of budget")
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundStyle(.white.opacity(0.85))
                         }
@@ -158,13 +181,19 @@ struct SettingsView: View {
         }
     }
 
+    /// 1M steps below 10M, 5M above — keeps the stepper usable across the
+    /// whole free→Max 20× range.
+    private func budgetStep(_ current: Int) -> Int {
+        current < 10_000_000 ? 1_000_000 : 5_000_000
+    }
+
     private var approximationNote: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "info.circle")
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.45))
                 .padding(.top, 2)
-            Text("Token limits are community estimates — Anthropic doesn't publish official numbers. Percentages are a rough gauge, not a meter.")
+            Text("Token counts are exact, parsed from this Mac's Claude Code logs — sessions on other devices aren't counted. The weekly budget is your own gauge; Anthropic doesn't publish per-plan token limits.")
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.55))
                 .fixedSize(horizontal: false, vertical: true)

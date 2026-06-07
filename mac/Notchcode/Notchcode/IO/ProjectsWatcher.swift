@@ -96,22 +96,22 @@ final class ProjectsWatcher {
         FSEventStreamStart(stream)
         print("[Notchcode] Watching \(path)")
 
-        // v0.7 boot-time catch-up: scan today's JSONLs so dailyCostUSD
-        // reflects work done before Notchcode launched. After this the
+        // Boot-time catch-up: scan the last week's JSONLs so the weekly token
+        // total reflects work done before Notchcode launched. After this the
         // per-file cursor is at EOF; FSEvents take over from there.
-        catchUpToday(rootPath: path)
+        catchUpWeek(rootPath: path)
     }
 
     /// Walk `~/.claude/projects/<slug>/*.jsonl` once, parsing every file
-    /// whose mtime is today. Skips silently if the dir doesn't exist.
-    private func catchUpToday(rootPath: String) {
+    /// whose mtime falls within the engine's 7-day usage window. Skips
+    /// silently if the dir doesn't exist.
+    private func catchUpWeek(rootPath: String) {
         let fm = FileManager.default
         guard let projects = try? fm.contentsOfDirectory(atPath: rootPath) else { return }
 
-        let calendar = Calendar.current
-        let now = Date()
+        let windowStart = Date().addingTimeInterval(-SessionStateEngine.weekSeconds)
 
-        var todaysFiles: [(url: URL, project: String)] = []
+        var recentFiles: [(url: URL, project: String)] = []
         for slug in projects {
             let projectDir = (rootPath as NSString).appendingPathComponent(slug)
             guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else { continue }
@@ -120,38 +120,40 @@ final class ProjectsWatcher {
                 let path = (projectDir as NSString).appendingPathComponent(name)
                 let attrs = try? fm.attributesOfItem(atPath: path)
                 let mtime = attrs?[.modificationDate] as? Date ?? .distantPast
-                if calendar.isDate(mtime, inSameDayAs: now) {
-                    todaysFiles.append((URL(fileURLWithPath: path), project))
+                if mtime >= windowStart {
+                    recentFiles.append((URL(fileURLWithPath: path), project))
                 }
             }
         }
-        guard !todaysFiles.isEmpty else { return }
+        guard !recentFiles.isEmpty else { return }
 
         Task.detached(priority: .utility) { [weak engine = self.engine] in
-            // Pool events across ALL today's files, then sort chronologically.
-            // The engine's block-anchor state machine requires monotonically
-            // increasing timestamps to correctly identify which event starts
-            // the current 5h session block. Per-file processing would
-            // interleave cross-session timestamps and break the anchor.
+            // Pool events across ALL files, then sort chronologically so the
+            // engine's rolling buffer stays front-oldest (pruneExpired pops
+            // from the front) and message history reads in order.
             //
-            // We deliberately do NOT pre-filter cost events by the 5h
-            // window: the state machine needs to see older events to know
-            // whether the current block is the user's first block of the
-            // day or block 2 / 3 / etc. pruneExpired() on the engine's
-            // buffer drops the stale ones lazily on the next read.
+            // Cost events older than the 7-day window are dropped here —
+            // they'd be pruned on the engine's first read anyway, no point
+            // shipping them across the actor hop. (A file touched this week
+            // can still open with week-old lines.)
             var allCosts: [JSONLParser.CostEvent] = []
             var allMessages: [JSONLParser.MessageEvent] = []
-            for (url, project) in todaysFiles {
+            for (url, project) in recentFiles {
                 let result = await JSONLParser.shared.parseNew(at: url, project: project)
                 allCosts.append(contentsOf: result.costs)
                 allMessages.append(contentsOf: result.messages)
             }
+            allCosts.removeAll { $0.timestamp < windowStart }
             allCosts.sort { $0.timestamp < $1.timestamp }
             allMessages.sort { $0.timestamp < $1.timestamp }
 
             guard let engine, !allCosts.isEmpty || !allMessages.isEmpty else { return }
+            // Immutable copies — capturing the mutable accumulators in the
+            // @MainActor closure is an error under Swift 6 strict concurrency.
+            let costs = allCosts
+            let messages = allMessages
             await MainActor.run {
-                for ev in allCosts {
+                for ev in costs {
                     let usd = CostTracker.cost(for: ev.usage, model: ev.model)
                     // Mirror the steady-state path: cache reads are bulk
                     // re-served tokens, billed at 10× less and not what
@@ -169,7 +171,7 @@ final class ProjectsWatcher {
                         at: ev.timestamp
                     )
                 }
-                for msg in allMessages {
+                for msg in messages {
                     engine.recordMessage(
                         sessionId: msg.sessionId,
                         project: msg.project,

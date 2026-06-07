@@ -45,18 +45,19 @@ final class AppSettings {
             }
         }
 
-        /// Approximate per-5-hour session-block token allowances. These count
+        /// Suggested weekly token budget per tier — the DEFAULT for the
+        /// user-editable `weeklyTokenBudget`, not a hard limit. These count
         /// input + output + cache-creation only (NOT cache reads, which are
-        /// near-free re-served bytes). Numbers are calibrated against
-        /// observed usage — Anthropic does not publish official limits, so
-        /// every percentage we render off these is a rough gauge, not gospel.
-        var sessionTokenLimit: Int {
+        /// near-free re-served bytes). Rough presets: Anthropic doesn't
+        /// publish token numbers, so the user is expected to tune their own
+        /// budget after watching a week of real usage.
+        var defaultWeeklyTokenBudget: Int {
             switch self {
-            case .free:  return    200_000
-            case .pro:   return  1_000_000
-            case .max5:  return  5_000_000
-            case .max20: return 20_000_000
-            case .api:   return Int.max     // no token-side cap; use dollar cap
+            case .free:  return   1_000_000
+            case .pro:   return  10_000_000
+            case .max5:  return  50_000_000
+            case .max20: return 200_000_000
+            case .api:   return 0          // unused — dollar cap instead
             }
         }
 
@@ -65,7 +66,22 @@ final class AppSettings {
     }
 
     var planTier: PlanTier {
-        didSet { defaults.set(planTier.rawValue, forKey: Self.kPlanTier) }
+        didSet {
+            defaults.set(planTier.rawValue, forKey: Self.kPlanTier)
+            // Switching tiers re-seeds the weekly budget with the new tier's
+            // preset — the old number was calibrated to the old plan.
+            if !planTier.usesDollarBudget {
+                weeklyTokenBudget = planTier.defaultWeeklyTokenBudget
+            }
+        }
+    }
+
+    /// User-editable weekly token budget the brake measures against. Seeded
+    /// from the plan tier's preset; this is the user's own gauge — Anthropic
+    /// doesn't publish per-plan token limits, and we deliberately stopped
+    /// pretending to know them (see SessionStateEngine's usage redesign).
+    var weeklyTokenBudget: Int {
+        didSet { defaults.set(weeklyTokenBudget, forKey: Self.kWeeklyBudget) }
     }
 
     /// When false: no cost/token UI surfaces at all. Recording still happens
@@ -75,8 +91,8 @@ final class AppSettings {
         didSet { defaults.set(usageTrackingEnabled, forKey: Self.kUsageTracking) }
     }
 
-    /// Fraction of the session token limit at which the brake fires.
-    /// 0.85 = pulse orange when 85% of the way through your 5-hour window.
+    /// Fraction of the weekly token budget (or daily $ cap for API tier) at
+    /// which the brake fires. 0.85 = warn at 85% of your budget.
     var brakeThresholdPercent: Double {
         didSet { defaults.set(brakeThresholdPercent, forKey: Self.kBrakeThreshold) }
     }
@@ -123,13 +139,19 @@ final class AppSettings {
     private static let kUsageTracking    = "notchcode.usageTrackingEnabled"
     private static let kBrakeThreshold   = "notchcode.brakeThresholdPercent"
     private static let kDailyCap         = "notchcode.dailyCapUSD"
+    private static let kWeeklyBudget     = "notchcode.weeklyTokenBudget"
     private static let kWorkingAnimation = "notchcode.workingAnimation"
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
         let rawTier = defaults.string(forKey: Self.kPlanTier) ?? PlanTier.max5.rawValue
-        self.planTier = PlanTier(rawValue: rawTier) ?? .max5
+        let tier = PlanTier(rawValue: rawTier) ?? .max5
+        self.planTier = tier
+        // Stored budget wins; otherwise seed from the tier preset. (didSet
+        // doesn't fire during init, so this is the only seeding path.)
+        self.weeklyTokenBudget = (defaults.object(forKey: Self.kWeeklyBudget) as? Int)
+            ?? tier.defaultWeeklyTokenBudget
         self.usageTrackingEnabled = (defaults.object(forKey: Self.kUsageTracking) as? Bool) ?? true
         self.brakeThresholdPercent = (defaults.object(forKey: Self.kBrakeThreshold) as? Double) ?? 0.85
         self.dailyCapUSD = (defaults.object(forKey: Self.kDailyCap) as? Double) ?? 25
