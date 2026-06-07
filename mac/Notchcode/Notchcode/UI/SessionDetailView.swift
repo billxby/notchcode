@@ -186,30 +186,24 @@ struct SessionDetailView: View {
             if items.isEmpty {
                 emptyState
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(items) { entry in
-                                row(for: entry).id(entry.id)
-                            }
-                            // Anchor at the bottom so scrollTo can tail-follow
-                            // as new turns / commands stream in.
-                            Color.clear.frame(height: 1).id(Self.tailAnchor)
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                    }
-                    .onAppear {
-                        proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                    }
-                    // Watch the combined count so a new command also tails the
-                    // scroll, not just a new message.
-                    .onChange(of: s.messages.count + s.recentActions.count) { _, _ in
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(items) { entry in
+                            row(for: entry)
                         }
                     }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
                 }
+                // Chat-style bottom anchoring. The previous ScrollViewReader +
+                // scrollTo(onAppear) approach forced layout of EVERY row (up
+                // to 200 markdown parses + AttributedString inits) in a single
+                // main-thread frame just to find the bottom — that was the
+                // drill-down open lag. defaultScrollAnchor starts at the
+                // bottom without defeating LazyVStack, and keeps tailing new
+                // turns while the user is at the bottom (and stops when they
+                // scroll up to read — strictly better than the forced tail).
+                .defaultScrollAnchor(.bottom)
             }
         } else {
             sessionGoneState
@@ -219,12 +213,14 @@ struct SessionDetailView: View {
     @ViewBuilder
     private func row(for entry: Entry) -> some View {
         switch entry {
-        case .message(let m): MessageRow(message: m)
+        // .equatable() lets SwiftUI skip a row's body when its Message is
+        // unchanged — without it, every engine mutation (JSONL appends, the
+        // 1s clock tick reaching NotchView) could re-run the markdown parse
+        // for every visible row.
+        case .message(let m): MessageRow(message: m).equatable()
         case .action(let a):  ActionRow(action: a)
         }
     }
-
-    private static let tailAnchor = "notchcode.session-detail.tail"
 
     private var emptyState: some View {
         VStack(spacing: 8) {
@@ -265,7 +261,7 @@ struct SessionDetailView: View {
 
 // MARK: - Message row
 
-private struct MessageRow: View {
+private struct MessageRow: View, Equatable {
     let message: SessionStateEngine.Message
 
     var body: some View {
@@ -281,7 +277,7 @@ private struct MessageRow: View {
                     .foregroundStyle(.white.opacity(0.35))
                 Spacer()
             }
-            MarkdownText(text: message.text)
+            MarkdownText(text: message.text, cacheKey: message.id)
                 .foregroundStyle(.white.opacity(0.85))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -297,10 +293,18 @@ private struct MessageRow: View {
     private var roleLabel: String { message.role == .user ? "You" : "Claude" }
     private var roleColor: Color { message.role == .user ? .blue.opacity(0.85) : .green.opacity(0.85) }
 
-    private var timestamp: String {
+    /// Shared formatter — DateFormatter() is one of the most expensive
+    /// common Foundation inits (~ms); allocating one per row body eval was
+    /// a measurable chunk of the drill-down open cost. @MainActor because
+    /// DateFormatter isn't Sendable; all rows render on main anyway.
+    @MainActor private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
-        return f.string(from: message.timestamp)
+        return f
+    }()
+
+    private var timestamp: String {
+        Self.timeFormatter.string(from: message.timestamp)
     }
 }
 
@@ -321,15 +325,34 @@ private struct MessageRow: View {
 /// paragraphs — but it covers the real shape of Claude Code conversations.
 private struct MarkdownText: View {
     let text: String
+    /// Message id used to memoize the block parse. Message text is immutable
+    /// once recorded (each JSONL line is a complete turn), so a parse keyed
+    /// by id never goes stale. Without this, LazyVStack re-parses a row's
+    /// full markdown every time it scrolls back into view.
+    var cacheKey: UUID? = nil
+
+    /// Parse memo. @MainActor (all rendering is main-thread); bounded by a
+    /// dumb full-clear well above messageHistoryLimit so it can't grow
+    /// unboundedly across many sessions.
+    @MainActor private static var blockCache: [UUID: [Block]] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Index-keyed ForEach is safe here: blocks are recomputed in full
             // whenever `text` changes, never partially mutated.
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(cachedBlocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
+    }
+
+    private var cachedBlocks: [Block] {
+        guard let key = cacheKey else { return blocks }
+        if let hit = Self.blockCache[key] { return hit }
+        let parsed = blocks
+        if Self.blockCache.count > 512 { Self.blockCache.removeAll(keepingCapacity: true) }
+        Self.blockCache[key] = parsed
+        return parsed
     }
 
     // MARK: Block model
