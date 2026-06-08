@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/a66e38a6-3e90-4853-9bf3-ee060aa490b2" width="640" controls muted playsinline></video>
+  <video src="https://github.com/user-attachments/assets/014d7d49-12c2-4321-b85a-bc2490bc11a5" width="640" controls muted playsinline></video>
 </p>
 
 > **🟢 Actively maintained**
