@@ -17,9 +17,7 @@
 </p>
 
 <p align="center">
-  <video src="https://storage.googleapis.com/billxby-web-assets/Notchcode/Demo%20Video.mp4" width="640" controls muted playsinline>
-    <a href="https://storage.googleapis.com/billxby-web-assets/Notchcode/Demo%20Video.mp4">▶ Watch the demo</a>
-  </video>
+  <video src="https://github.com/user-attachments/assets/a66e38a6-3e90-4853-9bf3-ee060aa490b2" width="640" controls muted playsinline></video>
 </p>
 
 > **🟢 Actively maintained**
