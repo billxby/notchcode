@@ -16,7 +16,11 @@
   </a>
 </p>
 
-<!-- TODO: demo GIF -->
+<p align="center">
+  <video src="https://storage.googleapis.com/billxby-web-assets/Notchcode/Demo%20Video.mp4" width="640" controls muted playsinline>
+    <a href="https://storage.googleapis.com/billxby-web-assets/Notchcode/Demo%20Video.mp4">▶ Watch the demo</a>
+  </video>
+</p>
 
 > **🟢 Actively maintained**
 >
