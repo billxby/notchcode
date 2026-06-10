@@ -20,6 +20,26 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# Launch-at-login: HKCU\…\Run registry entry on Windows (§11.4).
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps the user's existing settings.json key order intact when
+# we merge in hooks — otherwise serde_json sorts keys and churns their file.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Recursive file watcher for ~/.claude/projects/ (§11.3). Wraps
+# ReadDirectoryChangesW on Windows — the analog of macOS's FSEventStream.
+notify = "8"
+
+# Win32 interop for the overlay styling (§11.2). Pinned to the same `windows`
+# version Tauri itself uses (0.61.x) so the `HWND` returned by `window.hwnd()`
+# is the exact same type we hand to `SetWindowLongPtrW` / `SetWindowPos` — a
+# version mismatch here produces a confusing "expected HWND, found HWND" error.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Threading",
+  "Win32_Graphics_Gdi",
+] }
 

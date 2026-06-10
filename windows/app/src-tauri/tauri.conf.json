@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Notchcode",
-        "width": 400,
-        "height": 160,
+        "width": 212,
+        "height": 40,
         "visible": false,
         "transparent": true,
         "decorations": false,
@@ -33,13 +33,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "Bill Xu",
+    "category": "DeveloperTool",
+    "shortDescription": "An ambient Claude Code status pill for Windows.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

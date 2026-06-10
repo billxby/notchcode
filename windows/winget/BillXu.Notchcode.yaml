@@ -1,0 +1,10 @@
+# winget version manifest (template).
+# Submit this trio to microsoft/winget-pkgs at:
+#   manifests/b/BillXu/Notchcode/<version>/
+# Fill <PLACEHOLDER>s at release time (see installer manifest for hash/url).
+# Validate locally with:  winget validate --manifest windows/winget
+PackageIdentifier: BillXu.Notchcode
+PackageVersion: <VERSION>            # e.g. 0.1.0 — must match the other two files
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

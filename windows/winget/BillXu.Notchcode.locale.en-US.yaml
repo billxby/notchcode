@@ -1,0 +1,24 @@
+# winget default-locale manifest (template).
+PackageIdentifier: BillXu.Notchcode
+PackageVersion: <VERSION>
+PackageLocale: en-US
+Publisher: Bill Xu
+PublisherUrl: https://github.com/billxby
+PackageName: Notchcode
+PackageUrl: https://github.com/billxby/notchcode
+License: MIT
+LicenseUrl: https://github.com/billxby/notchcode/blob/main/LICENSE
+ShortDescription: An ambient Claude Code status pill for Windows.
+Description: >-
+  Notchcode is a borderless, always-on-top pill parked at the top-center of your
+  primary monitor that shows what your Claude Code sessions are doing at a glance
+  — working, waiting on a permission prompt, or done. Click it to open a panel
+  with per-session cost, runtime, recent activity, and a conversation drill-down.
+Tags:
+  - claude
+  - claude-code
+  - developer-tools
+  - status
+  - overlay
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
