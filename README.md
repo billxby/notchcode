@@ -5,7 +5,7 @@
 <h1 align="center">Notchcode</h1>
 
 <p align="center">
-  An ambient monitor for Claude Code that lives in your MacBook's notch — Windows support coming soon.
+  An ambient monitor for Claude Code that lives in your MacBook's notch — now on Windows too, as a top-center status pill.
   <br />
   <br />
   <a href="https://github.com/billxby/notchcode/releases/latest">
@@ -22,7 +22,7 @@
 
 > **🟢 Actively maintained**
 >
-> v1.0.0 launched June 2026. Issues and PRs are reviewed — Windows support is in active development.
+> v1.0.0 launched June 2026 with both macOS and Windows builds. Issues and PRs are reviewed.
 
 ## Features
 
@@ -34,13 +34,16 @@
 - **Session lifecycle** — end sessions gracefully from the notch; crashed sessions are detected automatically
 - **Auto hook setup** — additive, idempotent installer that never touches other tools' hooks
 - **Works on non-notch Macs** — renders a virtual notch at menubar center on Airs, minis, and external displays
+- **Windows support** — a borderless, always-on-top status pill at the top-center of your primary monitor (Tauri 2)
 
 ## Requirements
 
-- macOS 13+
+- macOS 13+, or Windows 10 (1809+) / Windows 11
 - [Claude Code](https://claude.com/claude-code) CLI
 
 ## Install
+
+### macOS
 
 Download the latest signed & notarized DMG from [Releases](https://github.com/billxby/notchcode/releases/latest), or build from source:
 
@@ -55,19 +58,34 @@ On first launch, Notchcode offers to install its Claude Code hooks for you. Pref
 curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash
 ```
 
+### Windows
+
+Download the latest installer (`Notchcode_x64-setup.exe`) from [Releases](https://github.com/billxby/notchcode/releases/latest) — per-user install, no admin rights required. SmartScreen may warn on first launch while the app builds reputation: **More info → Run anyway**.
+
+Or build from source:
+
+```powershell
+git clone https://github.com/billxby/notchcode.git
+cd notchcode/windows/app
+npm install
+npm run tauri dev
+```
+
+See [windows/README.md](windows/README.md) for development details, packaging, and uninstall notes.
+
 ## How It Works
 
-Notchcode watches the session files Claude Code already writes to `~/.claude/projects/` and listens for hook events on a local loopback server (`127.0.0.1:9876`). Hooks give sub-second updates; the file watcher keeps everything working even without them.
+Notchcode watches the session files Claude Code already writes to `~/.claude/projects/` (`%USERPROFILE%\.claude\projects\` on Windows) and listens for hook events on a local loopback server (`127.0.0.1:9876`). Hooks give sub-second updates; the file watcher keeps everything working even without them.
 
 Hooks are fire-and-forget: if Notchcode isn't running, they time out in under a second and Claude Code never notices.
 
 ## Privacy
 
-Everything stays on your Mac. No analytics, no telemetry, no network calls beyond loopback.
+Everything stays on your machine. No analytics, no telemetry, no network calls beyond loopback.
 
 ## Roadmap
 
-- 🚧 **Windows support** — in development right now (Tauri 2 + React/TS + Rust, notch-style top bar)
+- ✅ **Windows support** — shipped in v1.0.0 (Tauri 2 + React/TS + Rust, notch-style top bar)
 - **Themes & customization** — accent colors and prebuilt themes, community PR-driven
 - **Quality of life** — session history search, markdown export, configurable auto-expand rules
 - **Multi-monitor & power user** — choose your notch's display, keyboard shortcuts
@@ -75,7 +93,7 @@ Everything stays on your Mac. No analytics, no telemetry, no network calls beyon
 
 ## Contributing
 
-Contributions are welcome! Open an issue or a PR — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and ground rules. The Windows port is the biggest open area, and themes are designed to be community-driven from the start.
+Contributions are welcome! Open an issue or a PR — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and ground rules.
 
 ## Credits
 
