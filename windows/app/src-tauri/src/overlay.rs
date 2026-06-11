@@ -9,28 +9,60 @@
 // and Win32 styling, so a future framework pivot stays isolated behind a thin
 // seam.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tauri::{LogicalSize, PhysicalPosition, WebviewWindow, WindowEvent};
+use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, WebviewWindow, WindowEvent};
+
+/// Docked (true) = snapped flush to the top edge, rendered as the notch.
+/// Floating (false) = dragged somewhere on screen, rendered as a rounded blob.
+/// While floating we stop auto-recentering so the watch loop doesn't yank the
+/// blob back to the top. Single-window app, so a module-level flag is enough.
+static DOCKED: AtomicBool = AtomicBool::new(true);
+
+pub fn is_docked() -> bool {
+    DOCKED.load(Ordering::Relaxed)
+}
+
+pub fn set_docked(docked: bool) {
+    DOCKED.store(docked, Ordering::Relaxed);
+}
 
 /// How often the watch loop re-derives primary-monitor placement and re-asserts
 /// topmost. Monitor hot-plug and resolution changes have no first-class Tauri
 /// event, so we poll — cheaply, and only acting when geometry actually changed.
 const WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 
-/// Resting window size (logical px): just big enough for the pill plus its glow.
-/// Kept tight so the interactive (non-click-through) area blocking the desktop
-/// behind it stays minimal.
-const PILL_SIZE: LogicalSize<f64> = LogicalSize::new(212.0, 40.0);
+/// Resting window size (logical px). Bigger than the ~200×32 pill on purpose:
+/// the window is transparent, and the extra margin is the room the pill's drop
+/// shadow needs — anything wider than the margin gets clipped at the window edge
+/// and the shadow reads as a hard box. The pill itself stays centered/top-flush,
+/// so this only enlarges the transparent (shadow) area, not the visible pill.
+const PILL_SIZE: LogicalSize<f64> = LogicalSize::new(272.0, 64.0);
 
 /// Expanded window size when the panel is open. Grows downward from the pill;
 /// the pill stays screen-centered because both sizes recenter on the same axis.
-const PANEL_SIZE: LogicalSize<f64> = LogicalSize::new(380.0, 440.0);
+/// Sized with the same shadow margin around the 340px-wide panel card.
+const PANEL_SIZE: LogicalSize<f64> = LogicalSize::new(416.0, 480.0);
 
 /// One-call entry point used by the setup hook: style the window, place it,
 /// reveal it, then keep it correctly placed as the display environment changes.
-pub fn setup_overlay(window: &WebviewWindow) {
+///
+/// `restore` is the persisted position from a previous run: `Some((x, y))` in
+/// logical px means start *floating* there; `None` means start docked at the
+/// top. Placing before `show()` avoids a flash at the wrong spot.
+pub fn setup_overlay(window: &WebviewWindow, restore: Option<(f64, f64)>) {
     apply_overlay_styles(window);
-    reposition(window);
+
+    match restore {
+        Some((x, y)) => {
+            set_docked(false);
+            let _ = window.set_position(LogicalPosition::new(x, y));
+        }
+        None => {
+            set_docked(true);
+            reposition(window);
+        }
+    }
 
     // Created hidden (`visible: false`) so it never flashes at the OS default
     // location before we move it. Reveal now that it's placed.
@@ -97,9 +129,13 @@ fn start_watchers(window: &WebviewWindow) {
                 let s = monitor.size();
                 let geometry = (p.x, p.y, s.width, s.height);
 
+                // Only re-dock to top-center when actually docked; a floating
+                // blob keeps the position the user dragged it to.
                 if last_geometry != Some(geometry) {
                     last_geometry = Some(geometry);
-                    reposition(&watched);
+                    if is_docked() {
+                        reposition(&watched);
+                    }
                 }
             }
 
@@ -163,13 +199,49 @@ pub fn apply_overlay_styles(window: &WebviewWindow) {
     reassert_topmost(window);
 }
 
-/// Resize between the resting pill and the expanded panel, then recenter so the
-/// pill stays put horizontally and the panel grows downward. Driven by the
-/// frontend via the `set_panel_open` command when the user clicks the pill.
+/// Resize between the resting pill and the expanded panel. When docked we
+/// recenter on the top edge; when floating we keep the blob's top-left so the
+/// panel grows down from wherever the user parked it.
+///
+/// We recenter against the *target* `size` rather than calling `reposition`
+/// (which reads `outer_size()`): immediately after `set_size`, `outer_size()`
+/// can still report the old dimensions, so centering off it would place the new,
+/// wider window using the old width — yanking the pill sideways as the panel
+/// opens. Centering off the size we just asked for is race-free.
 pub fn set_panel_open(window: &WebviewWindow, open: bool) {
     let size = if open { PANEL_SIZE } else { PILL_SIZE };
     let _ = window.set_size(size);
-    reposition(window);
+    if is_docked() {
+        reposition_sized(window, size);
+    } else {
+        // Floating: `set_size` anchors the top-left, but the blob is centered in
+        // the window, so a width change slides it sideways by half the delta.
+        // Counter-shift the window's left edge to cancel that, keeping the blob
+        // visually pinned where the user parked it while the panel grows down.
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let dx = ((PANEL_SIZE.width - PILL_SIZE.width) / 2.0 * scale).round() as i32;
+        if let Ok(pos) = window.outer_position() {
+            let nx = if open { pos.x - dx } else { pos.x + dx };
+            let _ = window.set_position(PhysicalPosition::new(nx, pos.y));
+        }
+    }
+}
+
+/// Center a window of a *known* logical `size` flush against the top edge of the
+/// primary monitor. Like `reposition`, the centering math runs in physical px
+/// (logical size × scale factor) so it stays DPI-correct; unlike `reposition`,
+/// it doesn't read back the live window size, so it's safe to call right after a
+/// resize before the new size has settled.
+fn reposition_sized(window: &WebviewWindow, size: LogicalSize<f64>) {
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let m_pos = monitor.position();
+        let m_size = monitor.size();
+        let win_w = (size.width * scale).round() as i32;
+        let x = m_pos.x + (m_size.width as i32 - win_w) / 2;
+        let y = m_pos.y; // flush against the top edge
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
 }
 
 /// Pin the window above all non-topmost windows. `SWP_NO*` means "only touch the

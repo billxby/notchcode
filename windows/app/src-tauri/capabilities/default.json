@@ -6,6 +6,10 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "autostart:default"
+    "autostart:default",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-scale-factor",
+    "core:window:allow-current-monitor"
   ]
 }

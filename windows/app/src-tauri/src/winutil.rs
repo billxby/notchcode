@@ -12,9 +12,13 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows::Win32::System::Threading::{
-        AttachThreadInput, GetCurrentThreadId, GetExitCodeProcess, OpenProcess, TerminateProcess,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetExitCodeProcess,
+        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
@@ -83,6 +87,89 @@ mod imp {
         }
     }
 
+    /// The PID of the `claude` (or `node`) process that owns the hook we're
+    /// forwarding. Claude Code spawns the hook command through a shell, so the
+    /// forwarder's *parent* is usually `cmd.exe`/`bash.exe`, not Claude. We walk
+    /// the parent chain (skipping known shells) and return the first ancestor
+    /// that looks like Claude Code — the Windows analog of the Mac shim's
+    /// `$PPID`, but resilient to whatever shell Claude routes hooks through.
+    ///
+    /// Falls back to the first non-shell ancestor, then to the immediate parent,
+    /// so we always forward *something* usable for per-session liveness.
+    pub fn resolve_session_pid() -> Option<u32> {
+        // (pid, ppid, lowercased exe name) for every process — one cheap snapshot.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut procs: Vec<(u32, u32, String)> = Vec::new();
+        unsafe {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase();
+                    procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+
+        let parent_of = |pid: u32| -> Option<(u32, String)> {
+            procs
+                .iter()
+                .find(|(p, _, _)| *p == pid)
+                .map(|(_, ppid, _)| *ppid)
+                .and_then(|ppid| {
+                    procs
+                        .iter()
+                        .find(|(p, _, _)| *p == ppid)
+                        .map(|(p, _, name)| (*p, name.clone()))
+                })
+        };
+
+        const SHELLS: [&str; 9] = [
+            "cmd.exe",
+            "powershell.exe",
+            "pwsh.exe",
+            "bash.exe",
+            "sh.exe",
+            "conhost.exe",
+            "winpty.exe",
+            "git.exe",
+            "env.exe",
+        ];
+
+        let me = unsafe { GetCurrentProcessId() };
+        let mut cur = me;
+        let mut first_non_shell: Option<u32> = None;
+        let mut immediate_parent: Option<u32> = None;
+        for hop in 0..8 {
+            let Some((pid, name)) = parent_of(cur) else {
+                break;
+            };
+            if hop == 0 {
+                immediate_parent = Some(pid);
+            }
+            // Claude Code ships as `claude.exe` (native) or runs under `node.exe` (npm).
+            if name.contains("claude") || name == "node.exe" {
+                return Some(pid);
+            }
+            if first_non_shell.is_none() && !SHELLS.contains(&name.as_str()) {
+                first_non_shell = Some(pid);
+            }
+            cur = pid;
+        }
+        first_non_shell.or(immediate_parent)
+    }
+
     /// True if the current foreground window covers its entire monitor — a
     /// fullscreen game/video. We hide the overlay while this holds (§11.2). The
     /// desktop/shell isn't fullscreen by this measure, so the check is cheap and
@@ -128,6 +215,9 @@ mod imp {
         true
     }
     pub fn terminate(_pid: u32) {}
+    pub fn resolve_session_pid() -> Option<u32> {
+        None
+    }
     pub fn foreground_is_fullscreen() -> bool {
         false
     }

@@ -1,10 +1,26 @@
 /* The window itself is transparent (Tauri `transparent: true` + the Win32
-   styling in overlay.rs). Everything here stays transparent except the pill and
-   the panel card, or the notch illusion breaks. */
+   styling in overlay.rs). Everything stays transparent except the pill and the
+   sheet, or the notch illusion breaks. Visual language mirrors the macOS app:
+   a black notch that drops a rounded sheet, translucent cards, capsule
+   controls, Claude-orange working accent, hairline dividers. */
 
 :root {
-  font-family: Inter, -apple-system, "Segoe UI", sans-serif;
+  --surface: rgba(22, 22, 24, 0.975);
+  --text: #e8e8ea;
+  --text-2: #a0a0a8;
+  --text-3: #6f6f76;
+  --hair: rgba(255, 255, 255, 0.08);
+  --fill: rgba(255, 255, 255, 0.06);
+  --fill-2: rgba(255, 255, 255, 0.1);
+  --accent: #ff9d3d; /* Claude working orange */
+  --waiting: #ffb23d;
+  --done: #4ade80;
+  --user: #8b93ff;
+
+  font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
+    -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
 }
 
 html,
@@ -27,18 +43,38 @@ body,
   align-items: center;
 }
 
+/* ---- Resting pill -------------------------------------------------------- */
+
 .notch-wrap {
   cursor: pointer;
+  touch-action: none;
+}
+.notch-wrap.floating {
+  cursor: grab;
+}
+.notch-wrap.floating:active {
+  cursor: grabbing;
 }
 
 .notch {
   position: relative;
 }
 
+/* Docked notch — drop-shadow follows the concave SVG silhouette. */
 .notch-bg {
   position: absolute;
   inset: 0;
   display: block;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3))
+    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.32));
+}
+
+/* Floating blob — layered lift + faint top highlight. */
+.blob-bg {
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 2px 4px rgba(0, 0, 0, 0.25), 0 8px 22px rgba(0, 0, 0, 0.36);
 }
 
 .notch-content {
@@ -49,8 +85,6 @@ body,
   align-items: center;
   justify-content: center;
 }
-
-/* ---- Pill content (w0.5) ------------------------------------------------- */
 
 .pill-content {
   display: flex;
@@ -68,120 +102,371 @@ body,
   max-width: 130px;
 }
 
-/* ---- Status indicator (w0.5) --------------------------------------------- */
+/* ---- Status glyphs ------------------------------------------------------- */
+
+.status-slot {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 
 .status-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   display: inline-block;
   flex: none;
 }
-
 .status-idle {
   background: #5b5b5f;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.08);
 }
-
 .status-working {
-  background: #3da5ff;
-  box-shadow: 0 0 7px rgba(61, 165, 255, 0.8);
-  animation: notch-breathe 1.6s ease-in-out infinite;
+  background: var(--accent);
 }
-
-/* Calm, attention-seeking-but-not-frantic amber for permission waits. */
 .status-waiting {
-  background: #ffb23d;
-  box-shadow: 0 0 7px rgba(255, 178, 61, 0.85);
-  animation: notch-glow 2.4s ease-in-out infinite;
+  background: var(--waiting);
+}
+.status-done {
+  background: var(--done);
 }
 
-@keyframes notch-breathe {
-  0%,
-  100% {
-    opacity: 0.5;
-    transform: scale(0.82);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.12);
-  }
-}
-
-@keyframes notch-glow {
-  0%,
-  100% {
-    box-shadow: 0 0 4px rgba(255, 178, 61, 0.55);
-  }
-  50% {
-    box-shadow: 0 0 10px rgba(255, 178, 61, 1);
-  }
-}
-
-.status-check {
-  color: #4ade80;
+.glyph-spinner {
+  color: var(--accent);
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
-  text-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
-  animation: notch-settle 0.4s ease-out;
 }
 
-@keyframes notch-settle {
+.glyph-pulse {
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  animation: pulse-breathe 0.9s ease-in-out infinite alternate;
+}
+@keyframes pulse-breathe {
+  from {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+
+.glyph-waiting {
+  color: var(--waiting);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  animation: blink 0.6s ease-in-out infinite alternate;
+}
+@keyframes blink {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.45;
+  }
+}
+
+.glyph-check {
+  color: var(--done);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  animation: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes pop {
   0% {
-    opacity: 0;
     transform: scale(0.4);
+    opacity: 0;
   }
   60% {
     transform: scale(1.25);
   }
   100% {
-    opacity: 1;
     transform: scale(1);
+    opacity: 1;
   }
 }
 
-/* ---- Panel --------------------------------------------------------------- */
+/* Mascot — chunky pixel figure scuttling in place. */
+.glyph-mascot {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  animation: mascot-bob 0.44s steps(1) infinite;
+}
+@keyframes mascot-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.5px);
+  }
+}
+.mascot-body {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 10px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 1px;
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+}
+.mascot-eye {
+  width: 2px;
+  height: 2px;
+  background: #000;
+}
+.mascot-feet {
+  position: absolute;
+  left: 2px;
+  bottom: 0;
+  width: 10px;
+  height: 2px;
+  display: flex;
+  justify-content: space-between;
+}
+.mascot-foot {
+  width: 1.5px;
+  height: 2px;
+  background: var(--accent);
+}
+.mascot-foot.a {
+  animation: foot 0.44s steps(1) infinite;
+}
+.mascot-foot.b {
+  animation: foot 0.44s steps(1) infinite;
+  animation-delay: 0.22s;
+}
+@keyframes foot {
+  0%,
+  50% {
+    height: 2px;
+  }
+  51%,
+  100% {
+    height: 1px;
+  }
+}
 
-.panel {
-  margin-top: 8px;
+/* ---- The dropped sheet --------------------------------------------------- */
+
+.sheet {
   width: 340px;
-  max-height: 384px;
+  max-height: 440px;
+  display: flex;
+  background: var(--surface);
+  color: var(--text);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 40px rgba(0, 0, 0, 0.46);
+  animation: sheet-in 0.18s ease-out;
+}
+/* Docked: flush at the screen edge, only the bottom corners round — reads as
+   "the notch is dropping a sheet downward." Floating: a free rounded card. */
+.sheet.docked {
+  border-radius: 0 0 22px 22px;
+}
+.sheet.floating {
+  border-radius: 22px;
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sheet-inner {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px 10px;
+  flex: none;
+}
+
+.header-icon {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.header-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-divider {
+  height: 1px;
+  background: var(--hair);
+  flex: none;
+}
+
+.sheet-body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  background: rgba(20, 20, 22, 0.97);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
-  padding: 10px 12px;
-  color: #e8e8ea;
+  padding: 8px;
+}
+
+/* ---- Shared controls ----------------------------------------------------- */
+
+.pill-btn {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+  background: var(--fill-2);
+  border: none;
+  border-radius: 999px;
+  padding: 4px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pill-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.pill-btn.danger {
+  color: #ff9b97;
+  background: rgba(255, 80, 80, 0.18);
+}
+
+.gear-btn {
+  font-family: inherit;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  background: var(--fill);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.gear-btn:hover {
+  background: var(--fill-2);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.btn {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--fill);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.btn:hover {
+  background: var(--fill-2);
+}
+.btn:disabled {
+  opacity: 0.5;
   cursor: default;
 }
-
-.panel-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 8px;
+.btn.accent {
+  background: rgba(255, 157, 61, 0.9);
+  border-color: transparent;
+  color: #1c1205;
+}
+.btn.accent:hover {
+  background: var(--accent);
+}
+.btn.primary {
+  background: rgba(110, 123, 255, 0.85);
+  border-color: transparent;
+  color: #0d1030;
 }
 
-.panel-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #8a8a90;
-}
+/* ---- Usage badge + brake ------------------------------------------------- */
 
 .usage-badge {
-  font-size: 11px;
-  color: #b9b9bf;
-  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.75);
+  background: var(--fill);
+  border: none;
+  border-radius: 999px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.usage-badge.warn {
+  color: var(--waiting);
+  background: rgba(255, 178, 61, 0.18);
+}
+.usage-badge.braked {
+  color: var(--accent);
+  background: rgba(255, 157, 61, 0.24);
 }
 
-.panel-empty {
-  font-size: 13px;
-  color: #8a8a90;
-  padding: 8px 2px;
+.brake-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  margin-bottom: 6px;
+  border-radius: 9px;
+  background: rgba(255, 157, 61, 0.1);
+  border: 1px solid rgba(255, 157, 61, 0.22);
 }
+.brake-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.brake-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.88);
+}
+.brake-sub {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+/* ---- Session list -------------------------------------------------------- */
 
 .session-list {
   list-style: none;
@@ -195,17 +480,15 @@ body,
 .session-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 6px;
-  border-radius: 7px;
+  gap: 9px;
+  padding: 8px 8px;
+  border-radius: 9px;
   cursor: pointer;
 }
-
 .session-row:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--fill);
 }
-
-.session-ended {
+.session-row.ended {
   opacity: 0.5;
 }
 
@@ -216,116 +499,130 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
-}
-
-.session-meta {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.session-detail,
-.session-status {
-  font-size: 11px;
-  color: #8a8a90;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: inline-block;
-  max-width: 100%;
-}
-
-.session-cost {
-  font-size: 11px;
-  color: #b9b9bf;
-  font-variant-numeric: tabular-nums;
   flex: none;
 }
 
-.session-status-working {
-  color: #3da5ff;
-}
-.session-status-waiting {
-  color: #ffb23d;
-}
-.session-status-done {
-  color: #4ade80;
-}
-
-/* ---- Drill-down ---------------------------------------------------------- */
-
-.detail {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.detail-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.back-btn {
-  background: transparent;
-  border: none;
-  color: #9aa0ff;
-  font-size: 13px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.detail-project {
-  font-size: 14px;
-  font-weight: 600;
+.session-meta {
+  font-size: 11px;
+  color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.session-cost {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-3);
+  flex: none;
+}
+
+.row-btn {
+  font-family: inherit;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.6);
+  background: var(--fill);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.row-btn:hover {
+  background: var(--fill-2);
+}
+.row-btn.warn {
+  color: var(--waiting);
+  background: rgba(255, 178, 61, 0.18);
+}
+.row-btn.danger {
+  color: #ff9b97;
+  background: rgba(255, 80, 80, 0.18);
+  font-size: 9px;
+}
+
+/* ---- Empty / install states --------------------------------------------- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 20px;
+  text-align: center;
+}
+.empty-glyph {
+  font-size: 28px;
+  color: rgba(255, 255, 255, 0.22);
+  line-height: 1;
+}
+.empty-glyph.warn {
+  color: rgba(255, 178, 61, 0.7);
+}
+.empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+.empty-text {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.empty-text.small {
+  font-size: 11px;
+  padding: 6px 2px;
+}
+.empty-state.install .btn {
+  margin-top: 4px;
+}
+
+/* ---- Detail -------------------------------------------------------------- */
+
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
 }
 
 .detail-stats {
   display: flex;
   gap: 12px;
+  font-family: ui-monospace, monospace;
   font-size: 12px;
-  color: #b9b9bf;
-  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+.stat-status {
+  text-transform: capitalize;
+}
+.status-text-working {
+  color: var(--accent);
+}
+.status-text-waiting {
+  color: var(--waiting);
+}
+.status-text-done {
+  color: var(--done);
 }
 
-.detail-actions {
+.detail-section {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
 }
-
-.detail-actions button,
-.back-btn {
-  font-family: inherit;
-}
-
-.detail-actions button {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #e8e8ea;
-  border-radius: 7px;
-  padding: 5px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.detail-actions button:hover {
-  background: rgba(255, 255, 255, 0.14);
-}
-
-.detail-actions button.danger {
-  color: #ff8a8a;
-  border-color: rgba(255, 138, 138, 0.3);
-}
-
 .section-label {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #6f6f76;
-  margin-bottom: 5px;
+  color: var(--text-3);
+  font-weight: 600;
 }
 
 .action-list {
@@ -334,54 +631,297 @@ body,
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
-
 .action-list li {
   display: flex;
   gap: 7px;
   font-size: 12px;
 }
-
 .action-tool {
   color: #cfd0d4;
   font-weight: 500;
 }
-
 .action-detail {
-  color: #8a8a90;
+  color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.detail-messages {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .msg {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
 }
-
+.msg-user {
+  background: rgba(139, 147, 255, 0.08);
+}
 .msg-role {
-  font-size: 10px;
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #6f6f76;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  color: var(--text-3);
 }
-
 .msg-user .msg-role {
-  color: #9aa0ff;
+  color: var(--user);
 }
-
 .msg-text {
   font-size: 12px;
   line-height: 1.45;
   color: #d8d8dc;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---- Settings ------------------------------------------------------------ */
+
+.settings .sheet-header .header-title {
+  font-weight: 600;
+}
+
+.set-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+}
+
+.set-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.set-section-title {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.4);
+}
+.set-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.set-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+  flex: 1;
+  min-width: 0;
+}
+.set-value {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.set-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.set-help,
+.set-note {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.set-note {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-3);
+}
+.note-icon {
+  flex: none;
+}
+
+.select {
+  /* Scoped here (not :root) so WebView2 renders the native dropdown popup in
+     dark theme without forcing an opaque dark canvas behind the transparent
+     window. Without it the popup is light-themed white while the options
+     inherit our white text — white on white. */
+  color-scheme: dark;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--fill);
+  border: 1px solid var(--hair);
+  border-radius: 7px;
+  padding: 4px 8px;
+  max-width: 190px;
+  cursor: pointer;
+}
+.select option {
+  /* The popup can't do translucency; pin a solid dark surface so options stay
+     readable regardless of the WebView's theme heuristics. */
+  background: #1c1c1f;
+  color: var(--text);
+}
+.select:disabled {
+  opacity: 0.5;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--fill);
+  border-radius: 8px;
+  padding: 2px;
+}
+.stepper button {
+  font-family: inherit;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.stepper button:hover {
+  background: var(--fill-2);
+}
+.stepper button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.stepper-val {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  min-width: 52px;
+  text-align: center;
+}
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  outline: none;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.slider:disabled {
+  opacity: 0.5;
+}
+
+.toggle {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  flex: none;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  padding: 0;
+}
+.toggle.on {
+  background: var(--accent);
+}
+.toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+.toggle.on .toggle-knob {
+  transform: translateX(16px);
+}
+
+.status-chip {
+  font-size: 12px;
+  font-weight: 500;
+}
+.status-chip.ok {
+  color: var(--done);
+}
+.status-chip.warn {
+  color: var(--waiting);
+}
+
+.set-actions {
+  display: flex;
+  gap: 8px;
+}
+.set-error {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: #ff9b97;
+  word-break: break-word;
+}
+
+.about-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.about-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.about-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+}
+.about-tag {
+  font-size: 10px;
+  color: var(--text-2);
+}
+.about-ver {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+/* Scrollbar — thin, unobtrusive. */
+.sheet-body::-webkit-scrollbar {
+  width: 8px;
+}
+.sheet-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }

@@ -18,11 +18,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: the bottom-right tray companion (§11.7 — users trained on the
+# tray get a status dot + menu without looking up).
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 # Launch-at-login: HKCU\…\Run registry entry on Windows (§11.4).
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
+# Local calendar-day math for the "today" usage window + brake (the rolling
+# 7-day window only needs SystemTime, but "since local midnight" needs a tz).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # preserve_order keeps the user's existing settings.json key order intact when
 # we merge in hooks — otherwise serde_json sorts keys and churns their file.
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -40,6 +45,7 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_Graphics_Gdi",
 ] }
 

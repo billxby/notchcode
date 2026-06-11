@@ -16,13 +16,14 @@
 // Network.framework.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::watcher::Msg;
+use crate::winutil;
 
 /// Loopback port. Must match the installer's marker (`installer::MARKER`).
 pub const HOOK_PORT: u16 = 9876;
@@ -119,6 +120,60 @@ impl HookEvent {
             claude_pid,
         }
     }
+}
+
+/// Forward one hook to the running app, then exit. Invoked when Claude Code
+/// runs us as `notchcode.exe __notch_hook <Event>` (see `installer::hook_command`
+/// and `main.rs`). This replaces the Mac shim's bash one-liner: a native, shell-
+/// agnostic client sidesteps the `$PPID` / `2>/dev/null` / `|| true` bashisms
+/// that silently fail under cmd.exe — the §11.3 "top open risk."
+///
+/// Contract mirrors the old curl call: read the event JSON from stdin, POST it
+/// to `http://127.0.0.1:9876/hook/<Event>` with a 1s budget, and *never* fail
+/// loudly — a down or unreachable app must never block or error Claude Code.
+pub fn forward(event: &str) {
+    // Validate the event name against the server's routes; an unknown segment
+    // would just 404, so bail early and stay silent.
+    if HookKind::from_path_segment(event).is_none() {
+        return;
+    }
+
+    // Drain stdin (the hook payload Claude Code pipes in). Cap to stay bounded
+    // against a pathological producer; hook bodies are sub-KB in practice.
+    let mut body = Vec::new();
+    let _ = std::io::stdin()
+        .take(256 * 1024)
+        .read_to_end(&mut body);
+
+    // The owning Claude PID (walked past the shell) — the X-Claude-PID the Mac
+    // shim sent via $PPID, now resolved natively.
+    let pid = winutil::resolve_session_pid();
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], HOOK_PORT));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
+        return; // app not running / port closed — fire-and-forget, exit clean.
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+
+    let mut req = format!(
+        "POST /hook/{event} HTTP/1.1\r\nHost: 127.0.0.1:{HOOK_PORT}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    if let Some(pid) = pid {
+        req.push_str(&format!("X-Claude-PID: {pid}\r\n"));
+    }
+    req.push_str("\r\n");
+
+    let mut packet = req.into_bytes();
+    packet.extend_from_slice(&body);
+    let _ = stream.write_all(&packet);
+    let _ = stream.flush();
+    // Best-effort drain of the response so the server's write doesn't race a
+    // RST on close; we don't care about the contents.
+    let mut sink = [0u8; 64];
+    let _ = stream.read(&mut sink);
 }
 
 /// Spawn the hook server. Returns immediately; serves on its own thread, one

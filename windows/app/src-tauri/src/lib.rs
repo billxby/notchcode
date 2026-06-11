@@ -3,6 +3,9 @@ mod hooks;
 mod installer;
 mod overlay;
 mod sessions;
+mod settings;
+mod store;
+mod tray;
 mod watcher;
 mod winutil;
 
@@ -13,6 +16,14 @@ use tauri_plugin_autostart::ManagerExt;
 
 use sessions::{SessionDetail, SessionEngine};
 use watcher::SharedEngine;
+
+/// Hook-forwarder fast path. When Claude Code invokes us as
+/// `notchcode.exe __notch_hook <Event>`, we forward stdin to the already-running
+/// app's loopback server and exit — Tauri never starts. Called from `main()`
+/// before `run()`, so a hook never spins up a second overlay instance.
+pub fn forward_hook(event: &str) {
+    hooks::forward(event);
+}
 
 // ---- Hook installer commands ------------------------------------------------
 
@@ -26,12 +37,66 @@ fn hooks_installed() -> bool {
     installer::is_installed()
 }
 
+/// Strip only Notchcode's entries from settings.json (settings "Remove" button).
+#[tauri::command]
+fn uninstall_hooks() -> Result<String, String> {
+    installer::uninstall()
+}
+
+/// Quit Notchcode (the About section's Quit button — there's no taskbar entry).
+#[tauri::command]
+fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+// ---- Settings commands ------------------------------------------------------
+
+/// Current user preferences (plan tier, budget, brake threshold, animation).
+#[tauri::command]
+fn get_settings(state: State<settings::SharedSettings>) -> settings::AppSettings {
+    state.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Replace + persist user preferences. The frontend sends the whole struct.
+#[tauri::command]
+fn set_settings(
+    app: tauri::AppHandle,
+    state: State<settings::SharedSettings>,
+    value: settings::AppSettings,
+) {
+    if let Ok(mut s) = state.lock() {
+        *s = value.clone();
+    }
+    settings::save(&app, &value);
+}
+
 // ---- Overlay commands -------------------------------------------------------
 
 /// Expand/collapse the overlay between the resting pill and the open panel.
 #[tauri::command]
 fn set_panel_open(window: tauri::WebviewWindow, open: bool) {
     overlay::set_panel_open(&window, open);
+}
+
+/// Whether the overlay is currently docked (top notch) vs floating (blob).
+#[tauri::command]
+fn overlay_docked() -> bool {
+    overlay::is_docked()
+}
+
+/// Record docked/floating from the drag gesture. The frontend has already
+/// placed the window (snapping to the top-center of whichever monitor it's on),
+/// so we only update the flag — re-centering here would yank a notch docked on a
+/// secondary monitor back to the primary.
+#[tauri::command]
+fn set_docked(docked: bool) {
+    overlay::set_docked(docked);
+}
+
+/// Persist the blob's position (logical px) + docked state for next launch.
+#[tauri::command]
+fn save_overlay_pos(app: tauri::AppHandle, x: i32, y: i32, docked: bool) {
+    store::save(&app, store::OverlayPos { x, y, docked });
 }
 
 // ---- Session commands -------------------------------------------------------
@@ -64,7 +129,7 @@ fn remove_session(engine: State<SharedEngine>, id: String) {
     }
 }
 
-/// Jump to the terminal window where a waiting session lives (§0.5).
+/// Jump to the terminal window where a session lives (§0.5).
 /// Returns whether a window was raised.
 #[tauri::command]
 fn focus_terminal(engine: State<SharedEngine>, id: String) -> bool {
@@ -103,10 +168,20 @@ pub fn run() {
         ))
         .manage(engine.clone())
         .setup(move |app| {
+            // Load persisted preferences into managed state (needs the handle,
+            // so it happens here rather than at builder time).
+            let loaded = settings::load(app.handle());
+            app.manage(settings::SharedSettings::new(loaded));
+
             if let Some(window) = app.get_webview_window("main") {
-                overlay::setup_overlay(&window);
+                // Restore a floating position from last run, else dock at top.
+                let restore = store::load(app.handle())
+                    .filter(|p| !p.docked)
+                    .map(|p| (p.x as f64, p.y as f64));
+                overlay::setup_overlay(&window, restore);
             }
             installer::ensure_installed();
+            tray::setup(app.handle())?;
             watcher::start(app.handle().clone(), engine.clone());
 
             // Enable launch-at-login for real (packaged) installs only — don't
@@ -120,6 +195,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             install_hooks,
             hooks_installed,
+            uninstall_hooks,
+            quit,
+            get_settings,
+            set_settings,
             set_panel_open,
             get_session,
             acknowledge_done,
@@ -127,7 +206,10 @@ pub fn run() {
             remove_session,
             focus_terminal,
             autostart_enabled,
-            set_autostart
+            set_autostart,
+            overlay_docked,
+            set_docked,
+            save_overlay_pos
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

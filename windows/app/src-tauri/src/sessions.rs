@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use chrono::{DateTime, Local};
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +75,9 @@ pub struct SessionInfo {
     pub cost_usd: f64,
     pub runtime_secs: u64,
     pub ended: bool,
+    /// Whether a terminal HWND was captured — gates the Focus affordance
+    /// (the Mac equivalent is `terminalBundleID != nil`).
+    pub has_terminal: bool,
 }
 
 /// Full drill-down payload for one session (returned by the `get_session` cmd).
@@ -85,6 +90,7 @@ pub struct SessionDetail {
     pub cost_usd: f64,
     pub runtime_secs: u64,
     pub ended: bool,
+    pub has_terminal: bool,
     pub recent_actions: Vec<ActionInfo>,
     pub messages: Vec<MessageInfo>,
 }
@@ -126,7 +132,14 @@ impl Session {
 struct UsageTick {
     tokens: u64,
     usd: f64,
-    at: Instant,
+    /// Wall-clock time (not Instant) so "today" can mean the local calendar day.
+    at: SystemTime,
+}
+
+/// True if `t` falls on the current local calendar day.
+fn is_today(t: SystemTime) -> bool {
+    let dt: DateTime<Local> = t.into();
+    dt.date_naive() == Local::now().date_naive()
 }
 
 pub struct SessionEngine {
@@ -238,7 +251,11 @@ impl SessionEngine {
             return;
         }
         let now = Instant::now();
-        self.usage.push(UsageTick { tokens, usd, at: now });
+        self.usage.push(UsageTick {
+            tokens,
+            usd,
+            at: SystemTime::now(),
+        });
         self.weekly_tokens += tokens;
         self.weekly_dollars += usd;
 
@@ -263,6 +280,75 @@ impl SessionEngine {
             entry.project = project.to_string();
         }
         entry.messages.push(MessageInfo { role, text });
+        let overflow = entry.messages.len().saturating_sub(MESSAGE_LIMIT);
+        if overflow > 0 {
+            entry.messages.drain(0..overflow);
+        }
+    }
+
+    /// Boot-time catch-up ingestion for one historical JSONL — the Windows
+    /// analog of the Mac `ProjectsWatcher.catchUpWeek` recency gate. `mtime` is
+    /// the file's last-write wall-clock, used to both age the usage ticks and
+    /// decide whether the session is fresh enough to surface as a panel row.
+    ///
+    /// Usage always feeds the rolling weekly totals, so the badge reflects work
+    /// done before launch. A session row is only created when the file was
+    /// written within `STALE_TIMEOUT` — i.e. it belongs to a live, merely-idle
+    /// session. Week-old transcripts thus update the weekly figures without
+    /// resurrecting a week of dead sessions into the panel.
+    pub fn catch_up_file(
+        &mut self,
+        session_id: &str,
+        project: &str,
+        mtime: SystemTime,
+        messages: Vec<(Role, String)>,
+        usages: &[(Usage, Model)],
+    ) {
+        // Usage → weekly window. Stamp ticks with the file's real mtime so the
+        // "today"/7-day buckets and the prune horizon stay honest for history.
+        let mut row_usd = 0.0;
+        for (usage, model) in usages {
+            let tokens = usage.billable_tokens();
+            if tokens == 0 {
+                continue;
+            }
+            let usd = cost::cost(usage, *model);
+            self.usage.push(UsageTick {
+                tokens,
+                usd,
+                at: mtime,
+            });
+            self.weekly_tokens += tokens;
+            self.weekly_dollars += usd;
+            row_usd += usd;
+        }
+
+        // Only recent files map to a live session worth showing. Backdate the
+        // row's timestamps from the mtime so the snapshot's staleness filter
+        // treats it exactly like a session that went idle that long ago.
+        let age = SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(Duration::ZERO);
+        if age >= STALE_TIMEOUT {
+            return;
+        }
+        let now = Instant::now();
+        let stamp = now.checked_sub(age).unwrap_or(now);
+        let entry = self
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| Session::new(project.to_string(), Status::Idle, stamp));
+        if !project.is_empty() {
+            entry.project = project.to_string();
+        }
+        entry.last_update = stamp;
+        if stamp < entry.first_seen {
+            entry.first_seen = stamp;
+        }
+        entry.cost_usd += row_usd;
+        for (role, text) in messages {
+            entry.messages.push(MessageInfo { role, text });
+        }
         let overflow = entry.messages.len().saturating_sub(MESSAGE_LIMIT);
         if overflow > 0 {
             entry.messages.drain(0..overflow);
@@ -298,7 +384,7 @@ impl SessionEngine {
         }
     }
 
-    /// The captured terminal HWND for a session, used by the waiting jump.
+    /// The captured terminal HWND for a session, used by the focus jump.
     pub fn terminal_hwnd(&self, id: &str) -> Option<isize> {
         self.sessions.get(id).and_then(|s| s.terminal_hwnd)
     }
@@ -364,6 +450,26 @@ impl SessionEngine {
         self.weekly_dollars
     }
 
+    /// Tokens observed today (local calendar day). Scales the brake/today
+    /// figures with today's activity, not the whole week.
+    pub fn today_tokens(&self) -> u64 {
+        self.usage
+            .iter()
+            .filter(|t| is_today(t.at))
+            .map(|t| t.tokens)
+            .sum()
+    }
+
+    /// API-rate dollars spent today — the primary metric for the API tier,
+    /// matching the "daily $ cap" setting's semantics.
+    pub fn dollars_today(&self) -> f64 {
+        self.usage
+            .iter()
+            .filter(|t| is_today(t.at))
+            .map(|t| t.usd)
+            .sum()
+    }
+
     /// Recently-active sessions for the panel, stable-sorted by id.
     pub fn snapshot(&self) -> Vec<SessionInfo> {
         let now = Instant::now();
@@ -381,6 +487,7 @@ impl SessionEngine {
                 cost_usd: s.cost_usd,
                 runtime_secs: now.duration_since(s.first_seen).as_secs(),
                 ended: s.ended,
+                has_terminal: s.terminal_hwnd.is_some(),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -398,6 +505,7 @@ impl SessionEngine {
             cost_usd: s.cost_usd,
             runtime_secs: now.duration_since(s.first_seen).as_secs(),
             ended: s.ended,
+            has_terminal: s.terminal_hwnd.is_some(),
             recent_actions: s.recent_actions.clone(),
             messages: s.messages.clone(),
         })
@@ -407,14 +515,21 @@ impl SessionEngine {
 
     pub fn prune(&mut self) {
         let now = Instant::now();
-        self.sessions
-            .retain(|_, s| now.duration_since(s.last_update) < SESSION_TTL);
+        // Done is deliberately sticky (the Mac rule): the checkmark must
+        // outlive every timeout until the user acknowledges it or the Claude
+        // process dies (crash_check). TTL only forgets non-done sessions.
+        self.sessions.retain(|_, s| {
+            s.status == Status::Done || now.duration_since(s.last_update) < SESSION_TTL
+        });
 
         // Age out usage ticks past the 7-day window, decrementing the totals.
+        // Wall-clock here (usage ticks are SystemTime); a clock that jumped
+        // backwards just keeps the tick (treat as still fresh).
+        let wall = SystemTime::now();
         let mut removed_tokens = 0u64;
         let mut removed_dollars = 0.0f64;
         self.usage.retain(|t| {
-            if now.duration_since(t.at) < WEEK {
+            if wall.duration_since(t.at).map(|d| d < WEEK).unwrap_or(true) {
                 true
             } else {
                 removed_tokens += t.tokens;

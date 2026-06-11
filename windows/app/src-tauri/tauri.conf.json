@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Notchcode",
-        "width": 212,
-        "height": 40,
+        "width": 272,
+        "height": 64,
         "visible": false,
         "transparent": true,
         "decorations": false,

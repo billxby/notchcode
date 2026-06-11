@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -44,6 +44,8 @@ struct NotchState {
     sessions: Vec<SessionInfo>,
     weekly_tokens: u64,
     weekly_dollars: f64,
+    today_tokens: u64,
+    dollars_today: f64,
 }
 
 /// Messages the engine loop consumes from both producers.
@@ -102,6 +104,12 @@ fn run(app: AppHandle, engine: SharedEngine) {
     let mut last_state: Option<NotchState> = None;
     let mut ticks: u32 = 0;
 
+    // Boot scan: surface pre-launch usage and currently-idle sessions before the
+    // first live event arrives. Runs after the watch is established, so any write
+    // during the scan is queued on the channel and reconciled against the same
+    // cursors (offset-guarded `parse_new` — no double counting).
+    catch_up(&dir, &engine, &mut offsets);
+
     loop {
         match rx.recv_timeout(TICK) {
             Ok(Msg::Fs(Ok(event))) => {
@@ -143,12 +151,76 @@ fn run(app: AppHandle, engine: SharedEngine) {
                 sessions: e.snapshot(),
                 weekly_tokens: e.weekly_tokens(),
                 weekly_dollars: e.weekly_dollars(),
+                today_tokens: e.today_tokens(),
+                dollars_today: e.dollars_today(),
             }
         };
 
         if Some(&state) != last_state.as_ref() {
+            // Tray mirrors the pill, but only redraws on a *status* change —
+            // not on every cost/runtime tick that also dirties the state.
+            if last_state.as_ref().map(|s| s.status) != Some(state.status) {
+                crate::tray::update(&app, state.status);
+            }
             let _ = app.emit(STATE_EVENT, &state);
             last_state = Some(state);
+        }
+    }
+}
+
+/// One-time boot scan of `~/.claude/projects` so usage + currently-idle
+/// sessions from before launch are visible immediately — the Windows analog of
+/// the Mac `ProjectsWatcher.catchUpWeek`. Parses every JSONL written in the last
+/// 7 days, oldest first (so the rolling buffers stay chronological), seeding the
+/// per-file read cursors to EOF so the live watcher resumes without re-counting.
+fn catch_up(dir: &Path, engine: &SharedEngine, offsets: &mut HashMap<PathBuf, u64>) {
+    const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let window_start = SystemTime::now().checked_sub(WEEK);
+
+    let Ok(projects) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut recent: Vec<(PathBuf, String, SystemTime)> = Vec::new();
+    for proj in projects.flatten() {
+        let proj_path = proj.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+        let slug = proj_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let project = decode_project_slug(&slug);
+        let Ok(files) = std::fs::read_dir(&proj_path) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let path = f.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = f
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            if window_start.map(|w| mtime >= w).unwrap_or(true) {
+                recent.push((path, project.clone(), mtime));
+            }
+        }
+    }
+    // Chronological: weekly buffer stays front-oldest, messages read in order.
+    recent.sort_by_key(|(_, _, mtime)| *mtime);
+
+    for (path, slug_project, mtime) in recent {
+        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let result = parse_new(&path, offsets);
+        let project = result.project.unwrap_or(slug_project);
+        if let Ok(mut e) = engine.lock() {
+            e.catch_up_file(&session_id, &project, mtime, result.messages, &result.usages);
         }
     }
 }
