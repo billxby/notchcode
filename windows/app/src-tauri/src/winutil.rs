@@ -8,7 +8,8 @@
 
 #[cfg(windows)]
 mod imp {
-    use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
@@ -21,8 +22,9 @@ mod imp {
         OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-        IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
     };
 
     const STILL_ACTIVE: u32 = 259;
@@ -54,7 +56,11 @@ mod imp {
             // Attaching our input thread to the current foreground's lets
             // SetForegroundWindow actually take effect.
             let _ = AttachThreadInput(our_thread, fg_thread, true);
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            // Restore only when minimized: SW_RESTORE on a maximized window
+            // un-maximizes it, so an unconditional call resizes the target.
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
             let _ = BringWindowToTop(hwnd);
             let ok = SetForegroundWindow(hwnd).as_bool();
             let _ = AttachThreadInput(our_thread, fg_thread, false);
@@ -97,30 +103,7 @@ mod imp {
     /// Falls back to the first non-shell ancestor, then to the immediate parent,
     /// so we always forward *something* usable for per-session liveness.
     pub fn resolve_session_pid() -> Option<u32> {
-        // (pid, ppid, lowercased exe name) for every process — one cheap snapshot.
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
-        let mut procs: Vec<(u32, u32, String)> = Vec::new();
-        unsafe {
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
-                loop {
-                    let end = entry
-                        .szExeFile
-                        .iter()
-                        .position(|&c| c == 0)
-                        .unwrap_or(entry.szExeFile.len());
-                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase();
-                    procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
-                    if Process32NextW(snapshot, &mut entry).is_err() {
-                        break;
-                    }
-                }
-            }
-            let _ = CloseHandle(snapshot);
-        }
+        let procs = process_snapshot();
 
         let parent_of = |pid: u32| -> Option<(u32, String)> {
             procs
@@ -170,6 +153,134 @@ mod imp {
         first_non_shell.or(immediate_parent)
     }
 
+    /// (pid, ppid, lowercased exe name) for every process — one cheap snapshot.
+    fn process_snapshot() -> Vec<(u32, u32, String)> {
+        let mut procs: Vec<(u32, u32, String)> = Vec::new();
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return procs;
+        };
+        unsafe {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase();
+                    procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+        procs
+    }
+
+    /// A visible, unowned, titled top-level window.
+    struct TopWindow {
+        hwnd: isize,
+        pid: u32,
+        title: String,
+    }
+
+    /// Every visible top-level window with a title, plus its owning PID.
+    fn top_level_windows() -> Vec<TopWindow> {
+        unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let out = unsafe { &mut *(lparam.0 as *mut Vec<TopWindow>) };
+            unsafe {
+                // Skip invisible windows and owned popups (dialogs, tooltips).
+                if !IsWindowVisible(hwnd).as_bool() {
+                    return true.into();
+                }
+                if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.0.is_null()) {
+                    return true.into();
+                }
+                let mut buf = [0u16; 256];
+                let len = GetWindowTextW(hwnd, &mut buf);
+                if len <= 0 {
+                    return true.into();
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                out.push(TopWindow {
+                    hwnd: hwnd.0 as isize,
+                    pid,
+                    title: String::from_utf16_lossy(&buf[..len as usize]),
+                });
+            }
+            true.into()
+        }
+
+        let mut windows: Vec<TopWindow> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(collect), LPARAM(&mut windows as *mut _ as isize));
+        }
+        windows
+    }
+
+    /// The top-level window actually hosting a session's Claude process: walk
+    /// `claude_pid`'s ancestor chain (claude → shell → Windows Terminal /
+    /// VS Code / …) and return a window owned by the nearest ancestor that has
+    /// one. Deterministic, unlike capturing the foreground window at hook time,
+    /// which records whatever the user happened to be looking at.
+    ///
+    /// For multi-window processes (one Code.exe serves every VS Code window),
+    /// prefer a title naming the project, then the hook-captured HWND if that
+    /// process owns it, then the first window.
+    pub fn session_window(claude_pid: u32, project: &str, captured: Option<isize>) -> Option<isize> {
+        let procs = process_snapshot();
+
+        // Ancestors nearest-first, starting with the Claude process itself
+        // (claude.exe can own its own console window).
+        let mut chain = vec![claude_pid];
+        let mut cur = claude_pid;
+        for _ in 0..10 {
+            let Some(ppid) = procs
+                .iter()
+                .find(|(p, _, _)| *p == cur)
+                .map(|(_, pp, _)| *pp)
+            else {
+                break;
+            };
+            if ppid == 0 || chain.contains(&ppid) {
+                break;
+            }
+            chain.push(ppid);
+            cur = ppid;
+        }
+
+        let windows = top_level_windows();
+        let hint = project.to_ascii_lowercase();
+        for pid in chain {
+            let owned: Vec<&TopWindow> = windows.iter().filter(|w| w.pid == pid).collect();
+            if owned.is_empty() {
+                continue;
+            }
+            if !hint.is_empty() {
+                if let Some(w) = owned
+                    .iter()
+                    .find(|w| w.title.to_ascii_lowercase().contains(&hint))
+                {
+                    return Some(w.hwnd);
+                }
+            }
+            if let Some(c) = captured {
+                if owned.iter().any(|w| w.hwnd == c) {
+                    return Some(c);
+                }
+            }
+            return Some(owned[0].hwnd);
+        }
+        None
+    }
+
     /// True if the current foreground window covers its entire monitor — a
     /// fullscreen game/video. We hide the overlay while this holds (§11.2). The
     /// desktop/shell isn't fullscreen by this measure, so the check is cheap and
@@ -216,6 +327,9 @@ mod imp {
     }
     pub fn terminate(_pid: u32) {}
     pub fn resolve_session_pid() -> Option<u32> {
+        None
+    }
+    pub fn session_window(_claude_pid: u32, _project: &str, _captured: Option<isize>) -> Option<isize> {
         None
     }
     pub fn foreground_is_fullscreen() -> bool {

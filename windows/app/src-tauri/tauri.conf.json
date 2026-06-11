@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "notchcode",
+  "productName": "Notchcode",
   "version": "0.1.0",
   "identifier": "com.billxby.notchcode",
   "build": {
@@ -33,7 +33,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "publisher": "Bill Xu",
     "category": "DeveloperTool",
     "shortDescription": "An ambient Claude Code status pill for Windows.",
