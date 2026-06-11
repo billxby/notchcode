@@ -75,8 +75,9 @@ pub struct SessionInfo {
     pub cost_usd: f64,
     pub runtime_secs: u64,
     pub ended: bool,
-    /// Whether a terminal HWND was captured — gates the Focus affordance
-    /// (the Mac equivalent is `terminalBundleID != nil`).
+    /// Whether the session has something to jump to — a Claude PID to resolve
+    /// the hosting window from, or a hook-captured HWND. Gates the Focus
+    /// affordance (the Mac equivalent is `terminalBundleID != nil`).
     pub has_terminal: bool,
 }
 
@@ -384,9 +385,13 @@ impl SessionEngine {
         }
     }
 
-    /// The captured terminal HWND for a session, used by the focus jump.
-    pub fn terminal_hwnd(&self, id: &str) -> Option<isize> {
-        self.sessions.get(id).and_then(|s| s.terminal_hwnd)
+    /// Everything the focus jump needs: the Claude PID (to resolve the hosting
+    /// terminal/IDE window live), the hook-captured foreground HWND (fallback),
+    /// and the project name (title hint for multi-window apps).
+    pub fn focus_target(&self, id: &str) -> Option<(Option<u32>, Option<isize>, String)> {
+        self.sessions
+            .get(id)
+            .map(|s| (s.claude_pid, s.terminal_hwnd, s.project.clone()))
     }
 
     /// Mark sessions whose Claude process has died as ended (per-PID liveness).
@@ -487,7 +492,7 @@ impl SessionEngine {
                 cost_usd: s.cost_usd,
                 runtime_secs: now.duration_since(s.first_seen).as_secs(),
                 ended: s.ended,
-                has_terminal: s.terminal_hwnd.is_some(),
+                has_terminal: s.terminal_hwnd.is_some() || s.claude_pid.is_some(),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -505,7 +510,7 @@ impl SessionEngine {
             cost_usd: s.cost_usd,
             runtime_secs: now.duration_since(s.first_seen).as_secs(),
             ended: s.ended,
-            has_terminal: s.terminal_hwnd.is_some(),
+            has_terminal: s.terminal_hwnd.is_some() || s.claude_pid.is_some(),
             recent_actions: s.recent_actions.clone(),
             messages: s.messages.clone(),
         })

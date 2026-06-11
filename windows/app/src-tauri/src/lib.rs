@@ -131,13 +131,23 @@ fn remove_session(engine: State<SharedEngine>, id: String) {
 
 /// Jump to the terminal window where a session lives (§0.5).
 /// Returns whether a window was raised.
+///
+/// Resolution order: the window hosting the session's Claude PID (walked up the
+/// process tree — the authoritative answer), then the HWND captured at hook
+/// time (whatever was foreground then — best-effort).
 #[tauri::command]
 fn focus_terminal(engine: State<SharedEngine>, id: String) -> bool {
-    let hwnd = match engine.lock() {
-        Ok(e) => e.terminal_hwnd(&id),
+    let target = match engine.lock() {
+        Ok(e) => e.focus_target(&id),
         Err(_) => None,
     };
-    hwnd.map(winutil::focus_window).unwrap_or(false)
+    let Some((pid, captured, project)) = target else {
+        return false;
+    };
+    pid.and_then(|p| winutil::session_window(p, &project, captured))
+        .or(captured)
+        .map(winutil::focus_window)
+        .unwrap_or(false)
 }
 
 // ---- Autostart commands -----------------------------------------------------
