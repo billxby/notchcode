@@ -1,0 +1,18 @@
+# winget installer manifest (template).
+PackageIdentifier: BillXu.Notchcode
+PackageVersion: <VERSION>
+InstallerType: nsis
+Scope: user                          # NSIS installMode: currentUser
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    # GitHub release asset URL, e.g.
+    # https://github.com/billxby/notchcode/releases/download/v<VERSION>/notchcode_<VERSION>_x64-setup.exe
+    InstallerUrl: <INSTALLER_URL>
+    # sha256 of the .exe — `(Get-FileHash <file> -Algorithm SHA256).Hash`
+    InstallerSha256: <SHA256>
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -1,0 +1,51 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon: the bottom-right tray companion (§11.7 — users trained on the
+# tray get a status dot + menu without looking up).
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+# Launch-at-login: HKCU\…\Run registry entry on Windows (§11.4).
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+# Local calendar-day math for the "today" usage window + brake (the rolling
+# 7-day window only needs SystemTime, but "since local midnight" needs a tz).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# preserve_order keeps the user's existing settings.json key order intact when
+# we merge in hooks — otherwise serde_json sorts keys and churns their file.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Recursive file watcher for ~/.claude/projects/ (§11.3). Wraps
+# ReadDirectoryChangesW on Windows — the analog of macOS's FSEventStream.
+notify = "8"
+
+# Win32 interop for the overlay styling (§11.2). Pinned to the same `windows`
+# version Tauri itself uses (0.61.x) so the `HWND` returned by `window.hwnd()`
+# is the exact same type we hand to `SetWindowLongPtrW` / `SetWindowPos` — a
+# version mismatch here produces a confusing "expected HWND, found HWND" error.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Graphics_Gdi",
+] }
+
