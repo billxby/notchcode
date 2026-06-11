@@ -268,11 +268,8 @@ struct NotchView: View {
             }
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(engine.activeSessions.enumerated()), id: \.element.id) { idx, session in
-                        if idx > 0 {
-                            Divider().overlay(.white.opacity(0.08))
-                        }
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(engine.activeSessions) { session in
                         SessionRow(session: session, engine: engine)
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -727,17 +724,8 @@ private struct SessionRow: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.92))
                     .lineLimit(1)
-                Spacer()
-                // Only surface per-session $ when the user actually pays per
-                // token — for Pro/Max subscribers, API-rate dollars are noise
-                // and routinely look alarmingly high without being actionable.
-                if AppSettings.shared.usageTrackingEnabled
-                    && AppSettings.shared.planTier.usesDollarBudget
-                    && session.costUSD > 0 {
-                    Text(String(format: "$%.2f", session.costUSD))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
+                // Status reads inline, right of the project name (matching the
+                // Windows row) rather than pushed to the far edge.
                 if session.ended {
                     Text("ENDED")
                         .font(.system(size: 8, weight: .bold))
@@ -752,6 +740,17 @@ private struct SessionRow: View {
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                 }
+                Spacer()
+                // Only surface per-session $ when the user actually pays per
+                // token — for Pro/Max subscribers, API-rate dollars are noise
+                // and routinely look alarmingly high without being actionable.
+                if AppSettings.shared.usageTrackingEnabled
+                    && AppSettings.shared.planTier.usesDollarBudget
+                    && session.costUSD > 0 {
+                    Text(String(format: "$%.2f", session.costUSD))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
 
                 // Inline lifecycle controls — same actions as the drill-down
                 // header, surfaced here so multi-session users don't need a
@@ -760,7 +759,7 @@ private struct SessionRow: View {
                 // view everywhere else.
                 if !session.ended, session.terminalBundleID != nil {
                     RowIconButton(
-                        systemName: "apple.terminal",
+                        systemName: "arrow.up.right",
                         tint: isWaiting ? .yellow : .white.opacity(0.6),
                         bg: isWaiting ? .yellow.opacity(0.18) : .white.opacity(0.08),
                         action: focusTerminal
@@ -793,14 +792,6 @@ private struct SessionRow: View {
                     }
                     .help("End this Claude Code session (SIGTERM)")
                 }
-            }
-
-            // Global view shows just the latest command per session — the full
-            // command history lives in the per-session detail page so this row
-            // stays compact when many sessions are stacked.
-            if let latest = session.recentActions.last {
-                ActionRow(action: latest)
-                    .padding(.top, 4)
             }
         }
         .padding(.horizontal, 18)

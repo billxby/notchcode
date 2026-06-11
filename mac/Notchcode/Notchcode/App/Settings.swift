@@ -155,7 +155,7 @@ final class AppSettings {
         self.usageTrackingEnabled = (defaults.object(forKey: Self.kUsageTracking) as? Bool) ?? true
         self.brakeThresholdPercent = (defaults.object(forKey: Self.kBrakeThreshold) as? Double) ?? 0.85
         self.dailyCapUSD = (defaults.object(forKey: Self.kDailyCap) as? Double) ?? 25
-        let rawAnim = defaults.string(forKey: Self.kWorkingAnimation) ?? WorkingAnimation.spinner.rawValue
-        self.workingAnimation = WorkingAnimation(rawValue: rawAnim) ?? .spinner
+        let rawAnim = defaults.string(forKey: Self.kWorkingAnimation) ?? WorkingAnimation.mascot.rawValue
+        self.workingAnimation = WorkingAnimation(rawValue: rawAnim) ?? .mascot
     }
 }
