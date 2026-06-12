@@ -16,10 +16,6 @@
   </a>
 </p>
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/014d7d49-12c2-4321-b85a-bc2490bc11a5" width="640" controls muted playsinline></video>
-</p>
-
 > **🟢 Actively maintained**
 >
 > v1.0.0 launched June 2026 with both macOS and Windows builds. Issues and PRs are reviewed.
