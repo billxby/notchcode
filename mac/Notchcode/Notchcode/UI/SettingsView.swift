@@ -20,11 +20,18 @@ struct SettingsView: View {
     let overlay: NotchOverlay
     @State private var settings = AppSettings.shared
     @State private var installer = HookInstaller.shared
-    /// AX trust is checked synchronously and refreshed on appear (and after
-    /// the user clicks Grant) — the system doesn't give us a callback when
-    /// they toggle the switch in System Settings, so a manual re-check covers
-    /// the round-trip.
+    /// AX trust is checked synchronously and refreshed on appear, after the
+    /// user clicks Grant, and whenever macOS posts the accessibility-DB change
+    /// notification (see `body`'s `.onReceive`). The notification is what keeps
+    /// the status row honest while this panel stays open — the user toggles the
+    /// switch in System Settings without our window ever re-appearing, so
+    /// `onAppear` alone would leave the row stuck on "not granted".
     @State private var axTrusted: Bool = TerminalFocus.isTrusted()
+    /// Posted by macOS to the distributed center whenever the Accessibility
+    /// permission database changes (any app's switch flipped). We don't care
+    /// which app — we just re-read our own trust state when it fires.
+    private let axChanged = DistributedNotificationCenter.default()
+        .publisher(for: Notification.Name("com.apple.accessibility.api"))
     /// Login-item state is owned by the system (SMAppService), not
     /// UserDefaults — read it on appear and after every toggle so the switch
     /// stays honest even if the user flips it in System Settings.
@@ -52,6 +59,14 @@ struct SettingsView: View {
         .onAppear {
             axTrusted = TerminalFocus.isTrusted()
             launchAtLogin = LaunchAtLogin.isEnabled
+        }
+        .onReceive(axChanged) { _ in
+            // The notification can land a hair before the TCC change is
+            // queryable; re-reading on the next runloop tick avoids a stale
+            // false. isTrusted() is cheap, so the extra hop is invisible.
+            DispatchQueue.main.async {
+                axTrusted = TerminalFocus.isTrusted()
+            }
         }
     }
 
