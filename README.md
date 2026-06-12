@@ -11,9 +11,6 @@
   <a href="https://github.com/billxby/notchcode/releases/latest">
     <img src="https://img.shields.io/github/v/release/billxby/notchcode?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
   </a>
-  <a href="https://github.com/billxby/notchcode/releases">
-    <img src="https://badgen.net/github/assets-dl/billxby/notchcode?color=ffffff&labelColor=000000" alt="GitHub Downloads" />
-  </a>
 </p>
 
 > **🟢 Actively maintained**
