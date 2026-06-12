@@ -5,25 +5,26 @@
 <h1 align="center">Notchcode</h1>
 
 <p align="center">
-  An ambient monitor for Claude Code that lives in your MacBook's notch — now on Windows too, as a top-center status pill.
+  An ambient monitor for Claude Code and OpenAI Codex that lives in your MacBook's notch — now on Windows too, as a top-center status pill.
   <br />
   <br />
   <a href="https://github.com/billxby/notchcode/releases/latest">
     <img src="https://img.shields.io/github/v/release/billxby/notchcode?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
   </a>
   <a href="https://github.com/billxby/notchcode/releases">
-    <img src="https://img.shields.io/github/downloads/billxby/notchcode/total?style=rounded&color=white&labelColor=000000" alt="GitHub Downloads" />
+    <img src="https://badgen.net/github/assets-dl/billxby/notchcode?color=ffffff&labelColor=000000" alt="GitHub Downloads" />
   </a>
 </p>
 
 > **🟢 Actively maintained**
 >
-> v1.0.0 launched June 2026 with both macOS and Windows builds. Issues and PRs are reviewed.
+> v1.0.0 launched June 2026 with both macOS and Windows builds; v1.1.0 added Codex CLI support. Issues and PRs are reviewed.
 
 ## Features
 
 - **Notch UI** — at rest the overlay matches the hardware cutout exactly; it expands only when a session is live
 - **Live session monitoring** — track multiple Claude Code sessions in real-time via hooks, with a file-watcher fallback
+- **Codex support** — monitors OpenAI Codex CLI sessions through the same pipeline; mixed sessions sit side by side, badged `CC`/`CD` so you always know which agent is which
 - **Jump to terminal** — when Claude is waiting on a permission prompt, one tap on the notch focuses the right terminal
 - **Session drill-down** — tap a session to see its conversation history, live-tailed as it streams
 - **Usage tracking** — exact local token counts with a weekly budget and a quiet "brake" warning before you hit it
@@ -35,7 +36,7 @@
 ## Requirements
 
 - macOS 13+, or Windows 10 (1809+) / Windows 11
-- [Claude Code](https://claude.com/claude-code) CLI
+- [Claude Code](https://claude.com/claude-code) and/or [Codex](https://developers.openai.com/codex/cli/) CLI
 
 ## Install
 
@@ -51,7 +52,8 @@ open notchcode/mac/Notchcode/Notchcode.xcodeproj   # Xcode 16+, then ⌘R
 On first launch, Notchcode offers to install its Claude Code hooks for you. Prefer to do it manually?
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash
+curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash            # Claude Code
+curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash -s codex   # Codex
 ```
 
 ### Windows
@@ -71,9 +73,9 @@ See [windows/README.md](windows/README.md) for development details, packaging, a
 
 ## How It Works
 
-Notchcode watches the session files Claude Code already writes to `~/.claude/projects/` (`%USERPROFILE%\.claude\projects\` on Windows) and listens for hook events on a local loopback server (`127.0.0.1:9876`). Hooks give sub-second updates; the file watcher keeps everything working even without them.
+Notchcode watches the session files your agents already write — `~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex (under `%USERPROFILE%` on Windows) — and listens for hook events on a local loopback server (`127.0.0.1:9876`). Hooks give sub-second updates; the file watcher keeps everything working even without them.
 
-Hooks are fire-and-forget: if Notchcode isn't running, they time out in under a second and Claude Code never notices.
+Hooks are fire-and-forget: if Notchcode isn't running, they time out in under a second and the agent never notices.
 
 ## Privacy
 
@@ -82,6 +84,7 @@ Everything stays on your machine. No analytics, no telemetry, no network calls b
 ## Roadmap
 
 - ✅ **Windows support** — shipped in v1.0.0 (Tauri 2 + React/TS + Rust, notch-style top bar)
+- ✅ **Codex CLI support** — shipped in v1.1.0, on both platforms
 - **Themes & customization** — accent colors and prebuilt themes, community PR-driven
 - **Quality of life** — session history search, markdown export, configurable auto-expand rules
 - **Multi-monitor & power user** — choose your notch's display, keyboard shortcuts

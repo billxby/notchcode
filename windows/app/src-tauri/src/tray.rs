@@ -2,10 +2,11 @@
 // (notchcode-plan.md §11.0, §11.7: the taskbar tray is where Windows users'
 // eyes are trained; the notch metaphor borrows attention, the tray earns it).
 //
-// The icon is a status-colored disc generated in code (no asset pipeline, and
-// it can't drift from the CSS palette by more than this one table). Left-click
-// opens the panel; right-click offers Open / Settings / Quit. The watcher loop
-// calls `update` whenever the aggregate status changes.
+// The icon is the simplified Notchcode mark (a 32px render of
+// logo_simplified.png, embedded at compile time) tinted by the aggregate
+// status color, so the tray carries both the brand and the status at a
+// glance. Left-click opens the panel; right-click offers Open / Settings /
+// Quit. The watcher loop calls `update` whenever the aggregate status changes.
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -19,9 +20,6 @@ const TRAY_ID: &str = "notchcode-tray";
 
 /// Event the frontend listens on to switch views ("panel" | "settings").
 const OPEN_VIEW_EVENT: &str = "open-view";
-
-/// Icon bitmap edge (px). 32 scales cleanly at common tray DPIs.
-const SIZE: u32 = 32;
 
 /// Status palette — mirrors the CSS variables in App.css (--accent, --waiting,
 /// --done, .status-idle).
@@ -43,21 +41,21 @@ fn label(status: Status) -> &'static str {
     }
 }
 
-/// A filled status-colored disc on a transparent square, with a ~1px soft edge
-/// so it doesn't alias into a staircase at tray size.
+/// The Notchcode mark tinted by status. The embedded glyph is white on
+/// transparency, so multiplying each channel by the status color colorizes it
+/// while the antialiased alpha edges keep their softness. Decoding a 32px PNG
+/// per status change is negligible.
 fn icon(status: Status) -> Image<'static> {
+    static GLYPH: &[u8] = include_bytes!("../icons/tray.png");
     let [r, g, b] = color(status);
-    let center = (SIZE as f32 - 1.0) / 2.0;
-    let radius = SIZE as f32 / 2.0 - 2.0;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let d = ((x as f32 - center).powi(2) + (y as f32 - center).powi(2)).sqrt();
-            let a = (radius - d + 0.5).clamp(0.0, 1.0);
-            rgba.extend_from_slice(&[r, g, b, (a * 255.0) as u8]);
-        }
+    let img = Image::from_bytes(GLYPH).expect("embedded tray.png is valid");
+    let mut rgba = img.rgba().to_vec();
+    for px in rgba.chunks_exact_mut(4) {
+        px[0] = (px[0] as u16 * r as u16 / 255) as u8;
+        px[1] = (px[1] as u16 * g as u16 / 255) as u8;
+        px[2] = (px[2] as u16 * b as u16 / 255) as u8;
     }
-    Image::new_owned(rgba, SIZE, SIZE)
+    Image::new_owned(rgba, img.width(), img.height())
 }
 
 /// Build the tray icon + menu. Called once from the app setup hook.

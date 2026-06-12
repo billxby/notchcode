@@ -19,8 +19,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # tray-icon: the bottom-right tray companion (§11.7 — users trained on the
-# tray get a status dot + menu without looking up).
-tauri = { version = "2", features = ["tray-icon"] }
+# tray get a status dot + menu without looking up). image-png decodes the
+# embedded tray logo (icons/tray.png) that tray.rs tints by status.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 # Launch-at-login: HKCU\…\Run registry entry on Windows (§11.4).
 tauri-plugin-autostart = "2"

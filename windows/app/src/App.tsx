@@ -608,8 +608,10 @@ function App() {
       return;
     }
 
+    // Capture deliberately deferred to the drag threshold (onPointerMove):
+    // capturing here would retarget the eventual click to this element,
+    // swallowing clicks on children like the header's collapse.
     const target = e.currentTarget;
-    target.setPointerCapture(e.pointerId);
 
     drag.current = {
       target,
@@ -659,6 +661,7 @@ function App() {
     const dy = e.screenY - d.startSY;
     if (!d.moved && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
       d.moved = true;
+      d.target.setPointerCapture(d.pointerId);
       if (dockedRef.current) updateDocked(false);
     }
     if (!d.moved || !d.ready) return;
@@ -672,7 +675,9 @@ function App() {
     const d = drag.current;
     drag.current = null;
     if (!d) return;
-    d.target.releasePointerCapture(e.pointerId);
+    if (d.target.hasPointerCapture(e.pointerId)) {
+      d.target.releasePointerCapture(e.pointerId);
+    }
 
     if (!d.moved) {
       if (viewRef.current === "pill") onPillClick();

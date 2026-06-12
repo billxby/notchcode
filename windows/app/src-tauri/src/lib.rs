@@ -32,6 +32,23 @@ pub fn forward_hook(agent_seg: &str, event: &str) {
     hooks::forward(agent, event);
 }
 
+/// Uninstaller fast path. The NSIS pre-uninstall hook runs us as
+/// `notchcode.exe __notch_uninstall` before any files are removed, so the
+/// agents' configs stop referencing an exe that's about to disappear. Errors
+/// (config never written, agent not installed) are logged and ignored — the
+/// uninstall must proceed regardless.
+pub fn cleanup_for_uninstall() {
+    for agent in [Agent::Claude, Agent::Codex] {
+        match installer::uninstall(agent) {
+            Ok(msg) => eprintln!("[notchcode] {msg}"),
+            Err(e) => eprintln!(
+                "[notchcode] {} hook cleanup skipped: {e}",
+                agent.display_name()
+            ),
+        }
+    }
+}
+
 // ---- Hook installer commands ------------------------------------------------
 
 /// Parse the agent string from the frontend, defaulting to Claude.

@@ -19,7 +19,7 @@ mac/Notchcode/Notchcode/
 ├── UI/        # notch overlay, panel, settings (SwiftUI)
 ├── Vendored/  # notch geometry from DynamicNotchKit (MIT) — avoid editing
 └── Resources/ # hook install/uninstall scripts
-windows/       # Windows port (Tauri 2) — in development
+windows/       # Windows port (Tauri 2 + React/TS + Rust)
 ```
 
 ## Ground rules
@@ -37,8 +37,9 @@ windows/       # Windows port (Tauri 2) — in development
 
 ## Where help is most wanted
 
-- **Windows port** (`windows/`, Tauri 2 + React/TS + Rust) — the biggest open area
-- **Themes & customization** — designed to be community-driven from the start
+- **Theming & design** — accent colors, prebuilt themes, and overall visual polish; designed to be community-driven from the start
+- **More accurate usage tracking** — token counts are currently estimated from what the transcripts expose. Better accuracy is very welcome, but it has to stay within the ground rules: an ambient reader of local files only, no API calls or account access
+- **Sound effects & sound design** — subtle audio cues when a session finishes, hits a permission prompt, or errors out
 - Bug reports with reproduction steps — especially around multi-monitor setups and edge-case session states
 
 ## Questions
