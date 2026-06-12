@@ -90,6 +90,12 @@ fn set_panel_open(window: tauri::WebviewWindow, open: bool) {
     overlay::set_panel_open(&window, open);
 }
 
+/// Fit the window around the sheet card the frontend measured (logical px).
+#[tauri::command]
+fn resize_sheet(window: tauri::WebviewWindow, width: f64, height: f64) {
+    overlay::resize_sheet(&window, width, height);
+}
+
 /// Whether the overlay is currently docked (top notch) vs floating (blob).
 #[tauri::command]
 fn overlay_docked() -> bool {
@@ -223,6 +229,7 @@ pub fn run() {
             get_settings,
             set_settings,
             set_panel_open,
+            resize_sheet,
             get_session,
             acknowledge_done,
             end_session,

@@ -265,7 +265,8 @@ body,
 /* ---- The dropped sheet --------------------------------------------------- */
 
 .sheet {
-  width: 340px;
+  position: relative;
+  width: 340px; /* default — overridden inline by the drag-resizable width */
   max-height: 440px;
   display: flex;
   background: var(--surface);
@@ -274,6 +275,36 @@ body,
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06),
     0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 40px rgba(0, 0, 0, 0.46);
   animation: sheet-in 0.18s ease-out;
+}
+
+/* Session-list view: a fixed box sized for ~5 rows (47px header + divider +
+   5×38px rows with gaps and body padding). Fewer sessions just leave empty
+   space; more scroll inside the body. */
+.sheet.view-panel {
+  height: 262px;
+}
+
+/* Width-resize grip pinned to the sheet's right edge. Invisible hit strip;
+   a subtle bar appears on hover so it's discoverable without adding chrome. */
+.sheet-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: ew-resize;
+}
+.sheet-resize:hover::after,
+.sheet-resize:active::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
 }
 /* Docked: flush at the screen edge, only the bottom corners round — reads as
    "the notch is dropping a sheet downward." Floating: a free rounded card. */
@@ -492,6 +523,16 @@ body,
   opacity: 0.5;
 }
 
+/* Agent badge + project name + status share one text baseline so the mixed
+   font sizes don't read as vertically jumbled; the trio is then centered in
+   the row as one unit. */
+.session-label {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
 .session-project {
   font-size: 13px;
   font-weight: 500;
@@ -681,12 +722,68 @@ body,
 .msg-user .msg-role {
   color: var(--user);
 }
-.msg-text {
+/* Rendered markdown inside a chat bubble (MarkdownText.tsx). Sizes mirror the
+   Mac MarkdownText: 12px body, semibold headers, 11px mono code on a faint
+   card. */
+.md {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   font-size: 12px;
   line-height: 1.45;
   color: #d8d8dc;
-  white-space: pre-wrap;
   word-break: break-word;
+  min-width: 0;
+}
+.md-p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.md-h {
+  margin: 2px 0 0;
+  font-weight: 600;
+}
+.md-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.md-li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.md-marker {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.5);
+}
+.md-marker-num {
+  font-family: ui-monospace, Consolas, monospace;
+}
+.md-pre {
+  margin: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.md-code-inline {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+}
+.md a {
+  color: var(--user);
+  text-decoration: none;
+}
+.md a:hover {
+  text-decoration: underline;
 }
 
 /* ---- Settings ------------------------------------------------------------ */

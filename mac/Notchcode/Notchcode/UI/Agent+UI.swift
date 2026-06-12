@@ -13,13 +13,9 @@ extension Agent {
         }
     }
 
-    /// Short uppercase chip text shown on a session row to identify the agent.
-    var badgeText: String {
-        switch self {
-        case .claude: return "CLAUDE"
-        case .codex:  return "CODEX"
-        }
-    }
+    /// Short uppercase chip text shown on a session row to identify the agent:
+    /// CC = Claude Code, CD = Codex.
+    var badgeText: String { shortName }
 }
 
 /// Small colored capsule identifying which agent a session belongs to.

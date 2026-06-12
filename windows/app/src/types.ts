@@ -11,6 +11,12 @@ export const AGENT_LABELS: Record<Agent, string> = {
   codex: "Codex",
 };
 
+/** Compact two-letter label for tight UI (session-row badge, chat role tag). */
+export const AGENT_SHORT: Record<Agent, string> = {
+  claude: "CC",
+  codex: "CD",
+};
+
 /** Per-agent accent. Claude keeps its orange; Codex gets OpenAI's teal-green. */
 export const AGENT_ACCENT: Record<Agent, string> = {
   claude: "#ff9d3d",

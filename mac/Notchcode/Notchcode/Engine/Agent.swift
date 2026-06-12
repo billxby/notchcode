@@ -26,6 +26,15 @@ enum Agent: String, CaseIterable, Equatable, Codable, Sendable {
         }
     }
 
+    /// Compact two-letter label for tight UI (chat role tags, row badges):
+    /// CC = Claude Code, CD = Codex.
+    var shortName: String {
+        switch self {
+        case .claude: return "CC"
+        case .codex:  return "CD"
+        }
+    }
+
     /// Root config dir: ~/.claude or ~/.codex.
     var configDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser

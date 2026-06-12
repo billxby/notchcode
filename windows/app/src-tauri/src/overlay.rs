@@ -39,10 +39,17 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 /// so this only enlarges the transparent (shadow) area, not the visible pill.
 const PILL_SIZE: LogicalSize<f64> = LogicalSize::new(272.0, 64.0);
 
-/// Expanded window size when the panel is open. Grows downward from the pill;
-/// the pill stays screen-centered because both sizes recenter on the same axis.
-/// Sized with the same shadow margin around the 340px-wide panel card.
+/// Expanded window size when the panel first opens, before the frontend has
+/// measured its sheet (`resize_sheet` then snugs the window around the real
+/// content). Grows downward from the pill; the pill stays screen-centered
+/// because both sizes recenter on the same axis. Sized with the same shadow
+/// margin around the default 340px-wide panel card.
 const PANEL_SIZE: LogicalSize<f64> = LogicalSize::new(416.0, 480.0);
+
+/// Transparent margin the window keeps around the sheet card for its drop
+/// shadow (PANEL_SIZE 416×480 around the default 340×440 sheet).
+const SHEET_MARGIN_W: f64 = 76.0;
+const SHEET_MARGIN_H: f64 = 40.0;
 
 /// One-call entry point used by the setup hook: style the window, place it,
 /// reveal it, then keep it correctly placed as the display environment changes.
@@ -210,19 +217,37 @@ pub fn apply_overlay_styles(window: &WebviewWindow) {
 /// opens. Centering off the size we just asked for is race-free.
 pub fn set_panel_open(window: &WebviewWindow, open: bool) {
     let size = if open { PANEL_SIZE } else { PILL_SIZE };
+    resize_keep_center(window, size);
+}
+
+/// Fit the window snugly around the sheet card the frontend just measured
+/// (logical px), keeping the shadow margin. Called from a ResizeObserver, so
+/// the window tracks the sheet as the user drags its width handle and as the
+/// session list grows/shrinks — content the window doesn't need stops eating
+/// clicks meant for whatever is behind it.
+pub fn resize_sheet(window: &WebviewWindow, sheet_w: f64, sheet_h: f64) {
+    let size = LogicalSize::new(sheet_w + SHEET_MARGIN_W, sheet_h + SHEET_MARGIN_H);
+    resize_keep_center(window, size);
+}
+
+/// Resize to `size`, keeping the content's visual center fixed. Docked we
+/// recenter on the top edge; floating, `set_size` anchors the top-left while
+/// the content is centered in the window, so a width change slides it sideways
+/// by half the delta — counter-shift the left edge to cancel that, keeping the
+/// blob/sheet visually pinned where the user parked it while growing down.
+fn resize_keep_center(window: &WebviewWindow, size: LogicalSize<f64>) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let old_w = window.outer_size().map(|s| s.width as i32).ok();
     let _ = window.set_size(size);
     if is_docked() {
         reposition_sized(window, size);
-    } else {
-        // Floating: `set_size` anchors the top-left, but the blob is centered in
-        // the window, so a width change slides it sideways by half the delta.
-        // Counter-shift the window's left edge to cancel that, keeping the blob
-        // visually pinned where the user parked it while the panel grows down.
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let dx = ((PANEL_SIZE.width - PILL_SIZE.width) / 2.0 * scale).round() as i32;
-        if let Ok(pos) = window.outer_position() {
-            let nx = if open { pos.x - dx } else { pos.x + dx };
-            let _ = window.set_position(PhysicalPosition::new(nx, pos.y));
+    } else if let Some(old_w) = old_w {
+        let new_w = (size.width * scale).round() as i32;
+        let dx = (new_w - old_w) / 2;
+        if dx != 0 {
+            if let Ok(pos) = window.outer_position() {
+                let _ = window.set_position(PhysicalPosition::new(pos.x - dx, pos.y));
+            }
         }
     }
 }

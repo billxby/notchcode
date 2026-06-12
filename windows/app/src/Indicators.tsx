@@ -112,7 +112,13 @@ export function StatusIndicator({
   return <span className="status-slot">{inner}</span>;
 }
 
-/** Quiet color dot for non-working session rows / detail header. */
+/** Quiet color dot for non-working session rows / detail header. Sits in the
+ * same fixed 16×16 slot as StatusIndicator so rows mixing dots and working
+ * animations keep their columns aligned. */
 export function StatusDot({ status }: { status: Status }) {
-  return <span className={`status-dot status-${status}`} />;
+  return (
+    <span className="status-slot">
+      <span className={`status-dot status-${status}`} />
+    </span>
+  );
 }

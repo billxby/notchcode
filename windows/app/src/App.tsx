@@ -9,6 +9,7 @@ import {
 import NotchShape from "./NotchShape";
 import BlobShape from "./BlobShape";
 import SettingsView from "./Settings";
+import MarkdownText from "./MarkdownText";
 import { StatusIndicator, StatusDot } from "./Indicators";
 import {
   compactTokens,
@@ -17,7 +18,7 @@ import {
   usageFraction,
   usesDollarBudget,
   AGENT_ACCENT,
-  AGENT_LABELS,
+  AGENT_SHORT,
   type AppSettings,
   type NotchState,
   type SessionDetail,
@@ -35,6 +36,11 @@ const PILL_WINDOW_HEIGHT = 64;
 const SNAP_Y = 24;
 // Pointer travel before a press counts as a drag rather than a click.
 const DRAG_THRESHOLD = 4;
+// User-resizable sheet width (logical px), dragged at the sheet's right edge
+// and persisted across runs.
+const SHEET_MIN_WIDTH = 300;
+const SHEET_MAX_WIDTH = 560;
+const SHEET_DEFAULT_WIDTH = 340;
 
 type View = "pill" | "panel" | "settings" | "detail";
 
@@ -60,9 +66,12 @@ type DragState = {
   monWidth: number;
   monTop: number;
   monHeight: number;
+  /** Current window size (logical px) for clamping/snapping — the pill and
+      the expanded sheet windows differ, so it's read live at drag start. */
+  winW: number;
+  winH: number;
   moved: boolean;
   ready: boolean;
-  draggable: boolean;
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -264,18 +273,20 @@ function PanelView({
                 ) : (
                   <StatusDot status={s.status} />
                 )}
-                <span
-                  className="agent-badge"
-                  style={{
-                    color: AGENT_ACCENT[s.agent],
-                    backgroundColor: `${AGENT_ACCENT[s.agent]}29`,
-                  }}
-                >
-                  {AGENT_LABELS[s.agent].toUpperCase()}
-                </span>
-                <span className="session-project">{s.project || "—"}</span>
-                <span className="session-meta">
-                  {s.detail ? s.detail : s.status}
+                <span className="session-label">
+                  <span
+                    className="agent-badge"
+                    style={{
+                      color: AGENT_ACCENT[s.agent],
+                      backgroundColor: `${AGENT_ACCENT[s.agent]}29`,
+                    }}
+                  >
+                    {AGENT_SHORT[s.agent]}
+                  </span>
+                  <span className="session-project">{s.project || "—"}</span>
+                  <span className="session-meta">
+                    {s.detail ? s.detail : s.status}
+                  </span>
                 </span>
                 <span className="spacer" />
                 {showCost && s.cost_usd > 0 && (
@@ -412,9 +423,9 @@ function DetailView({
             detail.messages.map((m, i) => (
               <div key={i} className={`msg msg-${m.role}`}>
                 <span className="msg-role">
-                  {m.role === "user" ? "You" : AGENT_LABELS[detail.agent]}
+                  {m.role === "user" ? "You" : AGENT_SHORT[detail.agent]}
                 </span>
-                <span className="msg-text">{m.text}</span>
+                <MarkdownText text={m.text} />
               </div>
             ))
           )}
@@ -444,8 +455,21 @@ function App() {
   const [docked, setDocked] = useState(true);
   const [hooksInstalled, setHooksInstalled] = useState(true);
   const [brakeDismissedDay, setBrakeDismissedDay] = useState<string | null>(null);
+  const [sheetWidth, setSheetWidth] = useState(() => {
+    const stored = localStorage.getItem("sheet_width");
+    const v = stored ? Number(stored) : NaN;
+    return Number.isFinite(v)
+      ? clamp(v, SHEET_MIN_WIDTH, SHEET_MAX_WIDTH)
+      : SHEET_DEFAULT_WIDTH;
+  });
 
   const drag = useRef<DragState | null>(null);
+  const resize = useRef<{ startX: number; startW: number; lastW: number } | null>(
+    null
+  );
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  // Set when a window drag just ended, to swallow the click that release fires.
+  const suppressClick = useRef(false);
   const dockedRef = useRef(true);
   const viewRef = useRef<View>("pill");
   // Fresh-closure handle for listeners registered once on mount (tray events).
@@ -488,6 +512,24 @@ function App() {
   useEffect(() => {
     if (state.status !== "waiting") jumpConsumed.current = false;
   }, [state.status]);
+
+  // Fit the window snugly around the sheet as its content grows/shrinks (the
+  // session list loads at most ~5 rows) and as the user drags the width
+  // handle. The sheet's size is content/state-driven, never window-driven, so
+  // this can't feed back on itself. No-op in pill view (no sheet mounted).
+  useEffect(() => {
+    const el = sheetRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      invoke("resize_sheet", {
+        width: Math.ceil(r.width),
+        height: Math.ceil(r.height),
+      });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [view]);
 
   // ---- Usage brake -------------------------------------------------------
 
@@ -554,6 +596,18 @@ function App() {
   // ---- Dragging the blob -------------------------------------------------
 
   function onPointerDown(e: React.PointerEvent) {
+    // In the expanded views, only empty chrome starts a window drag — pressing
+    // a button, a session row, message text, or the width grip must keep its
+    // own behavior.
+    if (
+      viewRef.current !== "pill" &&
+      (e.target as Element).closest(
+        "button, a, input, select, textarea, label, .session-row, .msg, .sheet-resize"
+      )
+    ) {
+      return;
+    }
+
     const target = e.currentTarget;
     target.setPointerCapture(e.pointerId);
 
@@ -568,34 +622,38 @@ function App() {
       monWidth: window.screen.width,
       monTop: 0,
       monHeight: window.screen.height,
+      winW: PILL_WINDOW_WIDTH,
+      winH: PILL_WINDOW_HEIGHT,
       moved: false,
       ready: false,
-      draggable: viewRef.current === "pill",
     };
 
-    if (viewRef.current === "pill") {
-      const wnd = getCurrentWindow();
-      Promise.all([wnd.scaleFactor(), wnd.outerPosition(), currentMonitor()]).then(
-        ([scale, pos, mon]) => {
-          const d = drag.current;
-          if (!d) return;
-          d.startWX = pos.x / scale;
-          d.startWY = pos.y / scale;
-          if (mon) {
-            d.monLeft = mon.position.x / scale;
-            d.monWidth = mon.size.width / scale;
-            d.monTop = mon.position.y / scale;
-            d.monHeight = mon.size.height / scale;
-          }
-          d.ready = true;
-        }
-      );
-    }
+    const wnd = getCurrentWindow();
+    Promise.all([
+      wnd.scaleFactor(),
+      wnd.outerPosition(),
+      currentMonitor(),
+      wnd.outerSize(),
+    ]).then(([scale, pos, mon, size]) => {
+      const d = drag.current;
+      if (!d) return;
+      d.startWX = pos.x / scale;
+      d.startWY = pos.y / scale;
+      d.winW = size.width / scale;
+      d.winH = size.height / scale;
+      if (mon) {
+        d.monLeft = mon.position.x / scale;
+        d.monWidth = mon.size.width / scale;
+        d.monTop = mon.position.y / scale;
+        d.monHeight = mon.size.height / scale;
+      }
+      d.ready = true;
+    });
   }
 
   function onPointerMove(e: React.PointerEvent) {
     const d = drag.current;
-    if (!d || !d.draggable) return;
+    if (!d) return;
 
     const dx = e.screenX - d.startSX;
     const dy = e.screenY - d.startSY;
@@ -605,8 +663,8 @@ function App() {
     }
     if (!d.moved || !d.ready) return;
 
-    const nx = clamp(d.startWX + dx, d.monLeft, d.monLeft + d.monWidth - PILL_WINDOW_WIDTH);
-    const ny = clamp(d.startWY + dy, d.monTop, d.monTop + d.monHeight - PILL_WINDOW_HEIGHT);
+    const nx = clamp(d.startWX + dx, d.monLeft, d.monLeft + d.monWidth - d.winW);
+    const ny = clamp(d.startWY + dy, d.monTop, d.monTop + d.monHeight - d.winH);
     getCurrentWindow().setPosition(new LogicalPosition(Math.round(nx), Math.round(ny)));
   }
 
@@ -617,9 +675,13 @@ function App() {
     d.target.releasePointerCapture(e.pointerId);
 
     if (!d.moved) {
-      onPillClick();
+      if (viewRef.current === "pill") onPillClick();
+      // Expanded: a plain press is a click on sheet chrome (e.g. the header's
+      // collapse) — let the click event do its job.
       return;
     }
+    // A drag's release also fires a click on whatever it ends over — swallow it.
+    suppressClick.current = true;
 
     const wnd = getCurrentWindow();
     Promise.all([wnd.scaleFactor(), wnd.outerPosition()]).then(async ([scale, pos]) => {
@@ -627,18 +689,49 @@ function App() {
       let yL = pos.y / scale;
       const shouldDock = yL <= d.monTop + SNAP_Y;
       if (shouldDock) {
-        xL = d.monLeft + (d.monWidth - PILL_WINDOW_WIDTH) / 2;
+        xL = d.monLeft + (d.monWidth - d.winW) / 2;
         yL = d.monTop;
         await wnd.setPosition(new LogicalPosition(Math.round(xL), Math.round(yL)));
       }
       updateDocked(shouldDock);
       invoke("set_docked", { docked: shouldDock });
+      // Persist the pill-equivalent top-left (the windows share a center
+      // axis), so restarting restores the blob where the user expects it.
       invoke("save_overlay_pos", {
-        x: Math.round(xL),
+        x: Math.round(xL + (d.winW - PILL_WINDOW_WIDTH) / 2),
         y: Math.round(yL),
         docked: shouldDock,
       });
     });
+  }
+
+  // ---- Resizing the sheet width --------------------------------------------
+
+  function onResizeDown(e: React.PointerEvent) {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    resize.current = { startX: e.screenX, startW: sheetWidth, lastW: sheetWidth };
+  }
+
+  function onResizeMove(e: React.PointerEvent) {
+    const r = resize.current;
+    if (!r) return;
+    // The window keeps the sheet centered as it resizes, so the right edge
+    // only moves half of any width change — double the pointer delta so the
+    // edge tracks the cursor.
+    const w = Math.round(
+      clamp(r.startW + (e.screenX - r.startX) * 2, SHEET_MIN_WIDTH, SHEET_MAX_WIDTH)
+    );
+    r.lastW = w;
+    setSheetWidth(w);
+  }
+
+  function onResizeUp(e: React.PointerEvent) {
+    const r = resize.current;
+    if (!r) return;
+    resize.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    localStorage.setItem("sheet_width", String(r.lastW));
   }
 
   const PillContent = (
@@ -676,7 +769,21 @@ function App() {
           )}
         </div>
       ) : (
-        <div className={`sheet ${docked ? "docked" : "floating"}`}>
+        <div
+          className={`sheet ${docked ? "docked" : "floating"} view-${view}`}
+          style={{ width: sheetWidth }}
+          ref={sheetRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onClickCapture={(e) => {
+            if (suppressClick.current) {
+              suppressClick.current = false;
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }}
+        >
           {view === "panel" && (
             <PanelView
               state={state}
@@ -702,6 +809,13 @@ function App() {
           {view === "detail" && (
             <DetailView detail={detail} onBack={() => goTo("panel")} />
           )}
+          <div
+            className="sheet-resize"
+            title="Drag to resize"
+            onPointerDown={onResizeDown}
+            onPointerMove={onResizeMove}
+            onPointerUp={onResizeUp}
+          />
         </div>
       )}
     </div>

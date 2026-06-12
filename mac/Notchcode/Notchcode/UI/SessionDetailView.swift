@@ -220,7 +220,7 @@ struct SessionDetailView: View {
         // unchanged — without it, every engine mutation (JSONL appends, the
         // 1s clock tick reaching NotchView) could re-run the markdown parse
         // for every visible row.
-        case .message(let m): MessageRow(message: m, assistantLabel: (session?.agent ?? .claude).displayName).equatable()
+        case .message(let m): MessageRow(message: m, assistantLabel: (session?.agent ?? .claude).shortName).equatable()
         case .action(let a):  ActionRow(action: a)
         }
     }
@@ -266,9 +266,9 @@ struct SessionDetailView: View {
 
 private struct MessageRow: View, Equatable {
     let message: SessionStateEngine.Message
-    /// Display name for the assistant side ("Claude" / "Codex") so the
-    /// transcript reads with the right agent's name.
-    var assistantLabel: String = "Claude"
+    /// Compact label for the assistant side ("CC" / "CD") so the transcript
+    /// reads with the right agent's tag.
+    var assistantLabel: String = "CC"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
