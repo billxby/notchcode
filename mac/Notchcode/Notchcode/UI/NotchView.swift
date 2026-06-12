@@ -150,6 +150,7 @@ struct NotchView: View {
             StatusIndicator(
                 status: engine.aggregateStatus,
                 workingTint: .orange,
+                agent: engine.aggregateWorkingAgent,
                 forceColor: engine.brakeEngaged ? .orange : nil
             )
             Spacer(minLength: 0)
@@ -213,7 +214,7 @@ struct NotchView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            StatusIndicator(status: engine.aggregateStatus, workingTint: .orange)
+            StatusIndicator(status: engine.aggregateStatus, workingTint: .orange, agent: engine.aggregateWorkingAgent)
             Text(headerLabel)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.92))
@@ -261,7 +262,10 @@ struct NotchView: View {
         }
 
         if engine.activeSessions.isEmpty {
-            if installer.isInstalled {
+            // "Set up" CTA shows only when NEITHER agent is wired up. Once one
+            // is installed, the quiet idle state takes over; the second agent
+            // is managed from Settings.
+            if installer.isInstalled(.claude) || installer.isInstalled(.codex) {
                 emptyIdleState
             } else {
                 installPromptState
@@ -364,20 +368,20 @@ struct NotchView: View {
                 Text("Hooks not installed")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
-                Text("Notchcode needs a one-line entry in\n~/.claude/settings.json to see your sessions.")
+                Text("Notchcode needs a one-line entry in\n~/.claude/settings.json to see your sessions.\nAdd Codex in Settings.")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.55))
                     .multilineTextAlignment(.center)
             }
 
             Button {
-                installer.runInstaller()
+                installer.runInstaller(.claude)
             } label: {
                 HStack(spacing: 6) {
-                    if installer.isWorking {
+                    if installer.isWorking(.claude) {
                         ProgressView().controlSize(.mini).tint(.white)
                     }
-                    Text(installer.isWorking ? "Installing…" : "Install hooks")
+                    Text(installer.isWorking(.claude) ? "Installing…" : "Install hooks")
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .padding(.horizontal, 14)
@@ -385,9 +389,9 @@ struct NotchView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.yellow.opacity(0.85))
-            .disabled(installer.isWorking)
+            .disabled(installer.isWorking(.claude))
 
-            if let err = installer.lastError {
+            if let err = installer.lastError(.claude) {
                 Text(err)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.red.opacity(0.85))
@@ -428,10 +432,14 @@ struct NotchView: View {
 
 private struct StatusIndicator: View {
     let status: SessionStateEngine.Status
-    /// Brake state forces a specific working tint (orange). For the regular
-    /// working state we route through the user-selected animation, which
-    /// is always orange — Claude's brand color for both shapes.
+    /// Fallback working tint when no agent is supplied. For the regular working
+    /// state we route through the user-selected animation in Claude orange.
     var workingTint: Color = .orange
+    /// The agent driving the displayed status, when known (the collapsed pill
+    /// passes the working session's agent). Tints the working animation by
+    /// agent and forces Codex onto the pulsing dot — Codex never borrows the
+    /// two Claude-branded motions. nil keeps the Claude default.
+    var agent: Agent? = nil
     /// When set (e.g., brake engaged), overrides the per-status color to a
     /// single attention color so the pill reads "stop" regardless of what
     /// the underlying sessions are doing.
@@ -449,10 +457,14 @@ private struct StatusIndicator: View {
                 switch status {
                 case .idle:    EmptyView()
                 case .working:
-                    switch settings.workingAnimation {
-                    case .spinner: ClaudeSpinner(color: workingTint)
-                    case .pulse:   ClaudePulse(color: workingTint)
-                    case .mascot:  ClaudeMascot(color: workingTint)
+                    if agent == .codex {
+                        ClaudePulse(color: Agent.codex.accent)
+                    } else {
+                        switch settings.workingAnimation {
+                        case .spinner: ClaudeSpinner(color: agent?.accent ?? workingTint)
+                        case .pulse:   ClaudePulse(color: agent?.accent ?? workingTint)
+                        case .mascot:  ClaudeMascot(color: agent?.accent ?? workingTint)
+                        }
                     }
                 case .waiting: WaitingExclamation()
                 case .done:    CheckmarkBadge()
@@ -719,7 +731,8 @@ private struct SessionRow: View {
                 // pill uses (spinner/pulse/mascot per Settings) — a static
                 // dot undersold "Claude is actively doing something" in the
                 // expanded list. Other states keep the quiet color dot.
-                SessionStatusIndicator(status: session.status)
+                SessionStatusIndicator(status: session.status, agent: session.agent)
+                AgentBadge(agent: session.agent)
                 Text(session.project.isEmpty ? "(unknown)" : session.project)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.92))
@@ -844,20 +857,27 @@ private struct RowIconButton: View {
     }
 }
 
-/// Per-row status glyph. Working → the user-selected working animation
-/// (same component family as the pill's StatusIndicator, in Claude orange);
-/// every other state → the static color dot.
+/// Per-row status glyph. Working → the working animation, tinted by agent
+/// (Claude → its orange, Codex → its accent). Codex never borrows the two
+/// Claude-branded motions (the CLI flower / walking mascot); it always pulses
+/// in its own color so the animation reads as "this is Codex, not Claude."
+/// Every other state → the static color dot.
 private struct SessionStatusIndicator: View {
     let status: SessionStateEngine.Status
+    let agent: Agent
     @State private var settings = AppSettings.shared
 
     var body: some View {
         Group {
             if case .working = status {
-                switch settings.workingAnimation {
-                case .spinner: ClaudeSpinner(color: .orange)
-                case .pulse:   ClaudePulse(color: .orange)
-                case .mascot:  ClaudeMascot(color: .orange)
+                if agent == .codex {
+                    ClaudePulse(color: agent.accent)
+                } else {
+                    switch settings.workingAnimation {
+                    case .spinner: ClaudeSpinner(color: agent.accent)
+                    case .pulse:   ClaudePulse(color: agent.accent)
+                    case .mascot:  ClaudeMascot(color: agent.accent)
+                    }
                 }
             } else {
                 StatusDot(status: status)

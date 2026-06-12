@@ -35,7 +35,12 @@ struct NotchcodeApp: App {
 
         // File watcher (v0.2). Coarse "session is alive" signal; bumps
         // lastUpdate on every .jsonl modification.
-        ProjectsWatcher.shared.start(engine: SessionStateEngine.shared)
+        ClaudeProjectsWatcher.shared.start(engine: SessionStateEngine.shared)
+
+        // Codex transcript watcher. The Codex analog of ClaudeProjectsWatcher —
+        // tails ~/.codex/sessions/**/rollout-*.jsonl for project, messages,
+        // tokens, and cost. Harmless no-op until the user runs Codex.
+        CodexSessionsWatcher.shared.start(engine: SessionStateEngine.shared)
 
         // Hook HTTP server (v0.3). Receives Claude Code's lifecycle events
         // (PreToolUse, PostToolUse, UserPromptSubmit, Stop) via curl POSTs
@@ -47,6 +52,11 @@ struct NotchcodeApp: App {
         // ~/.claude/settings.json. Drives the panel empty-state hint and the
         // settings page's integration section.
         HookInstaller.shared.refresh()
+
+        // Notification banners for "an agent is blocked on you." Sets the
+        // delegate and requests permission up front so the first real waiting
+        // event can post immediately.
+        Notifier.shared.bootstrap()
     }
 
     var body: some Scene {

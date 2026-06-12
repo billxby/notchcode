@@ -12,7 +12,7 @@
 //             something, then run a command"). Tails to the bottom on entry
 //             and on each live append.
 //
-// Tool results and image blocks are still excluded — JSONLParser strips them
+// Tool results and image blocks are still excluded — ClaudeJSONLParser strips them
 // upstream. Commands appear via the hook stream (session.recentActions).
 
 import SwiftUI
@@ -220,7 +220,7 @@ struct SessionDetailView: View {
         // unchanged — without it, every engine mutation (JSONL appends, the
         // 1s clock tick reaching NotchView) could re-run the markdown parse
         // for every visible row.
-        case .message(let m): MessageRow(message: m).equatable()
+        case .message(let m): MessageRow(message: m, assistantLabel: (session?.agent ?? .claude).shortName).equatable()
         case .action(let a):  ActionRow(action: a)
         }
     }
@@ -266,6 +266,9 @@ struct SessionDetailView: View {
 
 private struct MessageRow: View, Equatable {
     let message: SessionStateEngine.Message
+    /// Compact label for the assistant side ("CC" / "CD") so the transcript
+    /// reads with the right agent's tag.
+    var assistantLabel: String = "CC"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -293,7 +296,7 @@ private struct MessageRow: View, Equatable {
         )
     }
 
-    private var roleLabel: String { message.role == .user ? "You" : "Claude" }
+    private var roleLabel: String { message.role == .user ? "You" : assistantLabel }
     private var roleColor: Color { message.role == .user ? .blue.opacity(0.85) : .green.opacity(0.85) }
 
     /// Shared formatter — DateFormatter() is one of the most expensive

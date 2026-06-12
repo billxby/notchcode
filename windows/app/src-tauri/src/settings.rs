@@ -64,6 +64,20 @@ pub struct AppSettings {
     /// API-tier daily dollar cap. Only consulted when `plan_tier == Api`.
     pub daily_cap_usd: f64,
     pub working_animation: WorkingAnimation,
+    /// Post a toast when a session blocks on the user (a permission/approval
+    /// request, or Codex's request_user_input). Defaults on. `serde(default)`
+    /// so configs written before this field existed still parse.
+    #[serde(default = "default_true")]
+    pub notify_on_waiting: bool,
+    /// Also raise the agent's terminal window the moment it starts waiting.
+    /// Defaults on; the user can disable to avoid focus being pulled.
+    #[serde(default = "default_true")]
+    pub focus_terminal_on_waiting: bool,
+}
+
+/// serde default for the waiting-alert toggles — both opt-out, not opt-in.
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -75,6 +89,8 @@ impl Default for AppSettings {
             brake_threshold_percent: 0.85,
             daily_cap_usd: 25.0,
             working_animation: WorkingAnimation::Mascot,
+            notify_on_waiting: true,
+            focus_terminal_on_waiting: true,
         }
     }
 }

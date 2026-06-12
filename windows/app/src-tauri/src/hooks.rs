@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::agent::Agent;
 use crate::watcher::Msg;
 use crate::winutil;
 
@@ -61,6 +62,9 @@ impl HookKind {
 #[derive(Clone, Debug)]
 pub struct HookEvent {
     pub kind: HookKind,
+    /// Which agent fired this hook — from the URL path segment
+    /// (/claude/hook/… vs /codex/hook/…), not the payload.
+    pub agent: Agent,
     pub session_id: Option<String>,
     pub project_path: Option<String>,
     #[allow(dead_code)] // shown on the pill/panel in w0.5/w0.6.
@@ -72,7 +76,7 @@ pub struct HookEvent {
 }
 
 impl HookEvent {
-    fn decode(kind: HookKind, body: &[u8], claude_pid: Option<u32>) -> Self {
+    fn decode(kind: HookKind, agent: Agent, body: &[u8], claude_pid: Option<u32>) -> Self {
         #[derive(Deserialize)]
         struct ToolInput {
             file_path: Option<String>,
@@ -110,6 +114,7 @@ impl HookEvent {
 
         HookEvent {
             kind,
+            agent,
             session_id: payload.as_ref().and_then(|p| p.session_id.clone()),
             // Claude Code has used both keys across versions; prefer project_dir.
             project_path: payload
@@ -131,23 +136,23 @@ impl HookEvent {
 /// Contract mirrors the old curl call: read the event JSON from stdin, POST it
 /// to `http://127.0.0.1:9876/hook/<Event>` with a 1s budget, and *never* fail
 /// loudly — a down or unreachable app must never block or error Claude Code.
-pub fn forward(event: &str) {
+pub fn forward(agent: Agent, event: &str) {
     // Validate the event name against the server's routes; an unknown segment
     // would just 404, so bail early and stay silent.
     if HookKind::from_path_segment(event).is_none() {
         return;
     }
 
-    // Drain stdin (the hook payload Claude Code pipes in). Cap to stay bounded
+    // Drain stdin (the hook payload the agent pipes in). Cap to stay bounded
     // against a pathological producer; hook bodies are sub-KB in practice.
     let mut body = Vec::new();
     let _ = std::io::stdin()
         .take(256 * 1024)
         .read_to_end(&mut body);
 
-    // The owning Claude PID (walked past the shell) — the X-Claude-PID the Mac
-    // shim sent via $PPID, now resolved natively.
-    let pid = winutil::resolve_session_pid();
+    // The owning agent PID (walked past the shell) — the per-session PID the Mac
+    // shim sent via $PPID, now resolved natively against this agent's process.
+    let pid = winutil::resolve_session_pid(agent.process_name());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], HOOK_PORT));
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
@@ -156,13 +161,14 @@ pub fn forward(event: &str) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
+    let segment = agent.segment();
     let mut req = format!(
-        "POST /hook/{event} HTTP/1.1\r\nHost: 127.0.0.1:{HOOK_PORT}\r\n\
+        "POST /{segment}/hook/{event} HTTP/1.1\r\nHost: 127.0.0.1:{HOOK_PORT}\r\n\
          Content-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if let Some(pid) = pid {
-        req.push_str(&format!("X-Claude-PID: {pid}\r\n"));
+        req.push_str(&format!("X-Notch-PID: {pid}\r\n"));
     }
     req.push_str("\r\n");
 
@@ -228,22 +234,39 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<Msg>) {
     if method != "POST" {
         return respond(&mut stream, "405 Method Not Allowed");
     }
-    let kind = match path
-        .strip_prefix("/hook/")
-        .and_then(HookKind::from_path_segment)
-    {
-        Some(k) => k,
-        None => return respond(&mut stream, "404 Not Found"),
+    // Two accepted path shapes:
+    //   /<agent>/hook/<Event>   — current, agent-tagged (claude|codex)
+    //   /hook/<Event>           — legacy Claude installs (pre-multi-agent)
+    let (agent, kind) = if let Some(rest) = path.strip_prefix("/hook/") {
+        match HookKind::from_path_segment(rest) {
+            Some(k) => (Agent::Claude, k),
+            None => return respond(&mut stream, "404 Not Found"),
+        }
+    } else {
+        // "/<segment>/hook/<Event>"
+        let segs: Vec<&str> = path.trim_start_matches('/').splitn(3, '/').collect();
+        if segs.len() == 3 && segs[1] == "hook" {
+            match (
+                Agent::from_segment(segs[0]),
+                HookKind::from_path_segment(segs[2]),
+            ) {
+                (Some(a), Some(k)) => (a, k),
+                _ => return respond(&mut stream, "404 Not Found"),
+            }
+        } else {
+            return respond(&mut stream, "404 Not Found");
+        }
     };
 
-    // Pull the two headers we care about.
+    // Pull the headers we care about. Accept the generic X-Notch-PID (current)
+    // and the legacy X-Claude-PID (older Claude-only installs).
     let mut content_length = 0usize;
     let mut claude_pid = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             match k.trim().to_ascii_lowercase().as_str() {
                 "content-length" => content_length = v.trim().parse().unwrap_or(0),
-                "x-claude-pid" => claude_pid = v.trim().parse().ok(),
+                "x-notch-pid" | "x-claude-pid" => claude_pid = v.trim().parse().ok(),
                 _ => {}
             }
         }
@@ -263,7 +286,7 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<Msg>) {
         body.truncate(content_length);
     }
 
-    let event = HookEvent::decode(kind, &body, claude_pid);
+    let event = HookEvent::decode(kind, agent, &body, claude_pid);
     let _ = tx.send(Msg::Hook(event));
     respond(&mut stream, "200 OK");
 }

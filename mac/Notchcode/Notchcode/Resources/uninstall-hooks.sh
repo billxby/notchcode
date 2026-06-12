@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# uninstall-hooks.sh — remove Notchcode entries from ~/.claude/settings.json.
+# uninstall-hooks.sh — remove Notchcode entries for a coding agent.
+#
+# Usage: uninstall-hooks.sh [claude|codex]   (defaults to claude)
 #
 # Mirrors install-hooks.sh's identification logic: a matcher-group is
 # considered ours iff every command inside it contains "127.0.0.1:9876".
-# Anything else is left untouched.
+# Anything else is left untouched. Each agent has its own config file, so
+# removing one agent's hooks never disturbs the other's.
 
 set -euo pipefail
 
-SETTINGS="${HOME}/.claude/settings.json"
+AGENT="${1:-claude}"
+case "$AGENT" in
+    claude) SETTINGS="${HOME}/.claude/settings.json" ;;
+    codex)  SETTINGS="${HOME}/.codex/hooks.json"     ;;
+    *) echo "ERROR: unknown agent '$AGENT' (expected claude|codex)" >&2; exit 2 ;;
+esac
+
 PORT="9876"
 MARKER="127.0.0.1:${PORT}"
 STAMP="$(date +%Y%m%d-%H%M%S)"

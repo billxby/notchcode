@@ -1,3 +1,6 @@
+mod agent;
+mod claude_jsonl;
+mod codex_rollout;
 mod cost;
 mod hooks;
 mod installer;
@@ -14,33 +17,42 @@ use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
+use agent::Agent;
 use sessions::{SessionDetail, SessionEngine};
 use watcher::SharedEngine;
 
-/// Hook-forwarder fast path. When Claude Code invokes us as
-/// `notchcode.exe __notch_hook <Event>`, we forward stdin to the already-running
-/// app's loopback server and exit — Tauri never starts. Called from `main()`
-/// before `run()`, so a hook never spins up a second overlay instance.
-pub fn forward_hook(event: &str) {
-    hooks::forward(event);
+/// Hook-forwarder fast path. When an agent invokes us as
+/// `notchcode.exe __notch_hook <agent> <Event>`, we forward stdin to the
+/// already-running app's loopback server and exit — Tauri never starts. Called
+/// from `main()` before `run()`, so a hook never spins up a second overlay.
+/// `agent_seg` is the agent segment ("claude"/"codex"); legacy installs omit it
+/// (handled in main.rs by defaulting to claude).
+pub fn forward_hook(agent_seg: &str, event: &str) {
+    let agent = Agent::from_segment(agent_seg).unwrap_or(Agent::Claude);
+    hooks::forward(agent, event);
 }
 
 // ---- Hook installer commands ------------------------------------------------
 
-#[tauri::command]
-fn install_hooks() -> Result<String, String> {
-    installer::install()
+/// Parse the agent string from the frontend, defaulting to Claude.
+fn parse_agent(s: &str) -> Agent {
+    Agent::from_segment(s).unwrap_or(Agent::Claude)
 }
 
 #[tauri::command]
-fn hooks_installed() -> bool {
-    installer::is_installed()
+fn install_hooks(agent: String) -> Result<String, String> {
+    installer::install(parse_agent(&agent))
 }
 
-/// Strip only Notchcode's entries from settings.json (settings "Remove" button).
 #[tauri::command]
-fn uninstall_hooks() -> Result<String, String> {
-    installer::uninstall()
+fn hooks_installed(agent: String) -> bool {
+    installer::is_installed(parse_agent(&agent))
+}
+
+/// Strip only Notchcode's entries from the agent's config (Settings "Remove").
+#[tauri::command]
+fn uninstall_hooks(agent: String) -> Result<String, String> {
+    installer::uninstall(parse_agent(&agent))
 }
 
 /// Quit Notchcode (the About section's Quit button — there's no taskbar entry).
@@ -76,6 +88,12 @@ fn set_settings(
 #[tauri::command]
 fn set_panel_open(window: tauri::WebviewWindow, open: bool) {
     overlay::set_panel_open(&window, open);
+}
+
+/// Fit the window around the sheet card the frontend measured (logical px).
+#[tauri::command]
+fn resize_sheet(window: tauri::WebviewWindow, width: f64, height: f64) {
+    overlay::resize_sheet(&window, width, height);
 }
 
 /// Whether the overlay is currently docked (top notch) vs floating (blob).
@@ -172,6 +190,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -210,6 +229,7 @@ pub fn run() {
             get_settings,
             set_settings,
             set_panel_open,
+            resize_sheet,
             get_session,
             acknowledge_done,
             end_session,

@@ -164,17 +164,29 @@ final class HookServer {
         }
         let path = String(parts[1])
 
-        let prefix = "/hook/"
-        guard path.hasPrefix(prefix) else {
-            respond(conn: conn, status: "404 Not Found"); return
+        // Two accepted shapes:
+        //   /<agent>/hook/<Event>   — current, agent-tagged (claude|codex)
+        //   /hook/<Event>           — legacy Claude installs (pre-multi-agent)
+        let (agent, kindStr): (Agent, String)
+        if path.hasPrefix("/hook/") {
+            agent = .claude
+            kindStr = String(path.dropFirst("/hook/".count))
+        } else {
+            // Expect "/<segment>/hook/<Event>".
+            let comps = path.split(separator: "/", omittingEmptySubsequences: true)
+            guard comps.count == 3, comps[1] == "hook",
+                  let a = Agent(rawValue: String(comps[0])) else {
+                respond(conn: conn, status: "404 Not Found"); return
+            }
+            agent = a
+            kindStr = String(comps[2])
         }
-        let kindStr = String(path.dropFirst(prefix.count))
         guard let kind = HookEvent.Kind(rawValue: kindStr) else {
             respond(conn: conn, status: "400 Unknown Hook Kind"); return
         }
 
-        let pid = Self.parseClaudePID(headers)
-        let event = HookEvent.decode(kind: kind, body: body, claudePid: pid)
+        let pid = Self.parseAgentPID(headers)
+        let event = HookEvent.decode(kind: kind, agent: agent, body: body, claudePid: pid)
         engine?.handleHookEvent(event)
         respond(conn: conn, status: "200 OK")
     }
@@ -201,13 +213,19 @@ final class HookServer {
         return nil
     }
 
-    /// v0.95 — extract `X-Claude-PID: <pid>` set by install-hooks.sh. Lets
-    /// the engine track a specific Claude Code process per session so the
-    /// notch can SIGTERM exactly one session without affecting siblings.
-    nonisolated private static func parseClaudePID(_ headerData: Data) -> Int32? {
+    /// Extract the agent process ID set by the hook shim via `$PPID`. Lets the
+    /// engine track a specific agent process per session so the notch can
+    /// SIGTERM exactly one session without affecting siblings. Accepts the
+    /// generic `X-Notch-PID` (current, agent-agnostic) and the legacy
+    /// `X-Claude-PID` (older Claude-only installs).
+    nonisolated private static func parseAgentPID(_ headerData: Data) -> Int32? {
         guard let str = String(data: headerData, encoding: .utf8) else { return nil }
         for line in str.split(separator: "\r\n") {
             let lower = line.lowercased()
+            if lower.hasPrefix("x-notch-pid:") {
+                let value = lower.dropFirst("x-notch-pid:".count).trimmingCharacters(in: .whitespaces)
+                return Int32(value)
+            }
             if lower.hasPrefix("x-claude-pid:") {
                 let value = lower.dropFirst("x-claude-pid:".count).trimmingCharacters(in: .whitespaces)
                 return Int32(value)

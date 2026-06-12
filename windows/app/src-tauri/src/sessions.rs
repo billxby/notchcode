@@ -1,22 +1,23 @@
-// Session state engine — Windows logic port of the Mac `SessionStateEngine` +
-// `JSONLParser` (notchcode-plan.md §0.2, §0.6, §0.7, §11.3).
+// Session state engine — Windows logic port of the Mac `SessionStateEngine`
+// (notchcode-plan.md §0.2, §0.6, §0.7, §11.3).
 //
-// Inputs: file activity (the watcher) and hooks (the hook server). File parsing
-// extracts the project name, conversation text, and token usage from each
-// session's JSONL; hooks supply precise lifecycle status. Outputs: an aggregate
-// status + detail for the pill, a session list for the panel, and per-session
-// drill-down detail (messages, recent actions, cost) on demand.
+// Inputs: file activity (the watcher) and hooks (the hook server). The
+// per-format transcript decoders live in their own modules (claude_jsonl.rs for
+// Claude Code, codex_rollout.rs for Codex) and both emit the shared
+// `ParseResult` defined here; hooks supply precise lifecycle status. Outputs: an
+// aggregate status + detail for the pill, a session list for the panel, and
+// per-session drill-down detail (messages, recent actions, cost) on demand.
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Agent;
 use crate::cost::{self, Model, Usage};
 use crate::hooks::{HookEvent, HookKind};
 use crate::winutil;
@@ -51,6 +52,36 @@ pub enum Role {
     Assistant,
 }
 
+/// Returned by `handle_hook` on the entry edge of a waiting transition so the
+/// caller (the watcher loop, which owns the AppHandle + Win32) can post a toast
+/// and raise the terminal. The engine stays free of Tauri/notification deps.
+#[derive(Clone, Debug)]
+pub struct WaitingNotice {
+    pub agent: Agent,
+    pub project: String,
+    pub detail: Option<String>,
+    /// Terminal window captured at hook-fire time (best-effort focus target).
+    pub terminal_hwnd: Option<isize>,
+    /// Owning agent PID, to resolve the precise hosting window for the jump.
+    pub claude_pid: Option<u32>,
+}
+
+/// Tool names that mean "the agent is blocked on the user," not "doing work."
+/// Codex models its interactive prompts as tool calls, so these arrive as
+/// PreToolUse hooks; without this they'd read as `working` and never alert.
+/// Claude routes the same intent through PermissionRequest, so this set is
+/// Codex-shaped. (Pulled from the Codex 0.139 protocol enum.)
+pub fn is_blocking_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "request_user_input"
+            | "request_permissions"
+            | "exec_approval_request"
+            | "apply_patch_approval_request"
+            | "elicitation_request"
+    )
+}
+
 /// One historical tool invocation (panel recent-activity feed).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct ActionInfo {
@@ -69,6 +100,8 @@ pub struct MessageInfo {
 #[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// Which coding agent this session belongs to (drives the UI badge/accent).
+    pub agent: Agent,
     pub project: String,
     pub status: Status,
     pub detail: Option<String>,
@@ -85,6 +118,7 @@ pub struct SessionInfo {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionDetail {
     pub id: String,
+    pub agent: Agent,
     pub project: String,
     pub status: Status,
     pub detail: Option<String>,
@@ -97,6 +131,7 @@ pub struct SessionDetail {
 }
 
 struct Session {
+    agent: Agent,
     project: String,
     status: Status,
     detail: Option<String>,
@@ -112,8 +147,9 @@ struct Session {
 }
 
 impl Session {
-    fn new(project: String, status: Status, now: Instant) -> Self {
+    fn new(agent: Agent, project: String, status: Status, now: Instant) -> Self {
         Self {
+            agent,
             project,
             status,
             detail: None,
@@ -164,12 +200,13 @@ impl SessionEngine {
 
     /// File watcher: this session's JSONL was written. Fallback working signal;
     /// never overrides a hook-set waiting/done.
-    pub fn record_activity(&mut self, session_id: &str, project: String) {
+    pub fn record_activity(&mut self, agent: Agent, session_id: &str, project: String) {
         let now = Instant::now();
+        let key = agent.session_key(session_id);
         let entry = self
             .sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| Session::new(project.clone(), Status::Working, now));
+            .entry(key)
+            .or_insert_with(|| Session::new(agent, project.clone(), Status::Working, now));
         if !project.is_empty() {
             entry.project = project;
         }
@@ -180,11 +217,16 @@ impl SessionEngine {
     }
 
     /// Hook: authoritative lifecycle event. `foreground` is the captured
-    /// foreground HWND (the terminal) for waiting/prompt events.
-    pub fn handle_hook(&mut self, event: &HookEvent, foreground: Option<isize>) {
-        let Some(session_id) = event.session_id.clone() else {
-            return;
-        };
+    /// foreground HWND (the terminal) for waiting/prompt events. Returns a
+    /// `WaitingNotice` on the entry edge of a waiting transition so the caller
+    /// can alert + focus; `None` for everything else.
+    pub fn handle_hook(
+        &mut self,
+        event: &HookEvent,
+        foreground: Option<isize>,
+    ) -> Option<WaitingNotice> {
+        let session_id = event.session_id.clone()?;
+        let key = event.agent.session_key(&session_id);
         let now = Instant::now();
         let project = event
             .project_path
@@ -194,8 +236,8 @@ impl SessionEngine {
 
         let entry = self
             .sessions
-            .entry(session_id)
-            .or_insert_with(|| Session::new(project.clone(), Status::Idle, now));
+            .entry(key)
+            .or_insert_with(|| Session::new(event.agent, project.clone(), Status::Idle, now));
         let was_waiting = entry.status == Status::Waiting;
         if !project.is_empty() {
             entry.project = project;
@@ -209,6 +251,14 @@ impl SessionEngine {
 
         match event.kind {
             HookKind::PreToolUse => {
+                // Codex surfaces "ask the user" / "approve this" as ordinary
+                // tool calls (request_user_input, *_approval_request) rather
+                // than a PermissionRequest hook — so a naive PreToolUse would
+                // read as `working` and never alert. Route those through the
+                // same waiting path; everything else is real work.
+                if event.tool_name.as_deref().map(is_blocking_tool).unwrap_or(false) {
+                    return enter_waiting(entry, was_waiting, foreground, event.tool_detail.clone());
+                }
                 entry.status = Status::Working;
                 entry.detail = event.tool_detail.clone().or_else(|| event.tool_name.clone());
                 if let Some(tool) = &event.tool_name {
@@ -232,20 +282,25 @@ impl SessionEngine {
                 entry.terminal_hwnd = foreground.or(entry.terminal_hwnd);
             }
             HookKind::PermissionRequest => {
-                entry.status = Status::Waiting;
-                if !was_waiting {
-                    entry.terminal_hwnd = foreground.or(entry.terminal_hwnd);
-                }
+                return enter_waiting(entry, was_waiting, foreground, event.tool_detail.clone());
             }
             HookKind::Stop => {
                 entry.status = Status::Done;
                 entry.detail = None;
             }
         }
+        None
     }
 
     /// Assistant message usage → per-session cost + weekly rolling totals.
-    pub fn record_usage(&mut self, session_id: &str, project: &str, usage: &Usage, model: Model) {
+    pub fn record_usage(
+        &mut self,
+        agent: Agent,
+        session_id: &str,
+        project: &str,
+        usage: &Usage,
+        model: Model,
+    ) {
         let usd = cost::cost(usage, model);
         let tokens = usage.billable_tokens();
         if tokens == 0 {
@@ -260,10 +315,11 @@ impl SessionEngine {
         self.weekly_tokens += tokens;
         self.weekly_dollars += usd;
 
+        let key = agent.session_key(session_id);
         let entry = self
             .sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| Session::new(project.to_string(), Status::Working, now));
+            .entry(key)
+            .or_insert_with(|| Session::new(agent, project.to_string(), Status::Working, now));
         if !project.is_empty() {
             entry.project = project.to_string();
         }
@@ -271,12 +327,20 @@ impl SessionEngine {
     }
 
     /// Append a parsed conversation turn (capped FIFO).
-    pub fn record_message(&mut self, session_id: &str, project: &str, role: Role, text: String) {
+    pub fn record_message(
+        &mut self,
+        agent: Agent,
+        session_id: &str,
+        project: &str,
+        role: Role,
+        text: String,
+    ) {
         let now = Instant::now();
+        let key = agent.session_key(session_id);
         let entry = self
             .sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| Session::new(project.to_string(), Status::Working, now));
+            .entry(key)
+            .or_insert_with(|| Session::new(agent, project.to_string(), Status::Working, now));
         if !project.is_empty() {
             entry.project = project.to_string();
         }
@@ -284,6 +348,43 @@ impl SessionEngine {
         let overflow = entry.messages.len().saturating_sub(MESSAGE_LIMIT);
         if overflow > 0 {
             entry.messages.drain(0..overflow);
+        }
+    }
+
+    /// Codex-only: a coarse turn boundary parsed from the rollout transcript.
+    /// `TurnStarted` → working, `TurnCompleted` → done. This is Codex's
+    /// running/idle backbone because its hooks can't provide one (no Stop hook;
+    /// built-in tools fire no PreToolUse). Marked `hook_driven` so the status
+    /// gets the long staleness window — a turn can run minutes between writes,
+    /// and the 4s file window would otherwise decay it to idle mid-turn.
+    pub fn record_lifecycle(
+        &mut self,
+        agent: Agent,
+        session_id: &str,
+        project: &str,
+        kind: Lifecycle,
+    ) {
+        let now = Instant::now();
+        let key = agent.session_key(session_id);
+        let entry = self
+            .sessions
+            .entry(key)
+            .or_insert_with(|| Session::new(agent, project.to_string(), Status::Idle, now));
+        if !project.is_empty() {
+            entry.project = project.to_string();
+        }
+        entry.last_update = now;
+        entry.hook_driven = true;
+        entry.ended = false;
+        match kind {
+            Lifecycle::TurnStarted => {
+                entry.status = Status::Working;
+                entry.detail = None;
+            }
+            Lifecycle::TurnCompleted => {
+                entry.status = Status::Done;
+                entry.detail = None;
+            }
         }
     }
 
@@ -299,11 +400,13 @@ impl SessionEngine {
     /// resurrecting a week of dead sessions into the panel.
     pub fn catch_up_file(
         &mut self,
+        agent: Agent,
         session_id: &str,
         project: &str,
         mtime: SystemTime,
         messages: Vec<(Role, String)>,
         usages: &[(Usage, Model)],
+        last_lifecycle: Option<Lifecycle>,
     ) {
         // Usage → weekly window. Stamp ticks with the file's real mtime so the
         // "today"/7-day buckets and the prune horizon stay honest for history.
@@ -335,16 +438,27 @@ impl SessionEngine {
         }
         let now = Instant::now();
         let stamp = now.checked_sub(age).unwrap_or(now);
+        let key = agent.session_key(session_id);
         let entry = self
             .sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| Session::new(project.to_string(), Status::Idle, stamp));
+            .entry(key)
+            .or_insert_with(|| Session::new(agent, project.to_string(), Status::Idle, stamp));
         if !project.is_empty() {
             entry.project = project.to_string();
         }
         entry.last_update = stamp;
         if stamp < entry.first_seen {
             entry.first_seen = stamp;
+        }
+        // A turn boundary from the tail of a recent rollout means the session
+        // was mid-turn (working) or just finished (done) at launch — surface
+        // that instead of a flat idle. hook_driven so it keeps the long window.
+        if let Some(kind) = last_lifecycle {
+            entry.hook_driven = true;
+            entry.status = match kind {
+                Lifecycle::TurnStarted => Status::Working,
+                Lifecycle::TurnCompleted => Status::Done,
+            };
         }
         entry.cost_usd += row_usd;
         for (role, text) in messages {
@@ -438,6 +552,28 @@ impl SessionEngine {
         }
     }
 
+    /// The agent driving the aggregate when it's working, so the collapsed pill
+    /// can tint its spinner by agent (and force Codex onto the pulse). Prefers
+    /// the agent of a working session with a tool detail — the one whose phrase
+    /// the pill shows — then any plain working session. `None` when nothing is
+    /// working; mixed agents resolve to whichever wins that order.
+    pub fn aggregate_working_agent(&self) -> Option<Agent> {
+        let now = Instant::now();
+        let mut named: Option<Agent> = None;
+        let mut plain: Option<Agent> = None;
+        for s in self.sessions.values() {
+            if s.ended || effective_status(s, now) != Status::Working {
+                continue;
+            }
+            if s.detail.is_some() {
+                named.get_or_insert(s.agent);
+            } else {
+                plain.get_or_insert(s.agent);
+            }
+        }
+        named.or(plain)
+    }
+
     /// Detail text for the pill: the tool phrase of a fresh working session.
     pub fn aggregate_detail(&self) -> Option<String> {
         let now = Instant::now();
@@ -486,6 +622,7 @@ impl SessionEngine {
             })
             .map(|(id, s)| SessionInfo {
                 id: id.clone(),
+                agent: s.agent,
                 project: s.project.clone(),
                 status: effective_status(s, now),
                 detail: s.detail.clone(),
@@ -504,6 +641,7 @@ impl SessionEngine {
         let now = Instant::now();
         self.sessions.get(id).map(|s| SessionDetail {
             id: id.to_string(),
+            agent: s.agent,
             project: s.project.clone(),
             status: effective_status(s, now),
             detail: s.detail.clone(),
@@ -547,6 +685,32 @@ impl SessionEngine {
     }
 }
 
+/// Flip a session into `Waiting` and, on the entry edge, capture its terminal
+/// and emit a `WaitingNotice`. Shared by the PermissionRequest hook and Codex's
+/// blocking tool calls — both mean "the agent is parked until the user answers."
+/// `was_waiting` guards the notice to the entry edge so a re-fired hook doesn't
+/// re-alert or re-steal focus.
+fn enter_waiting(
+    entry: &mut Session,
+    was_waiting: bool,
+    foreground: Option<isize>,
+    detail: Option<String>,
+) -> Option<WaitingNotice> {
+    entry.status = Status::Waiting;
+    entry.detail = detail.clone();
+    if was_waiting {
+        return None;
+    }
+    entry.terminal_hwnd = foreground.or(entry.terminal_hwnd);
+    Some(WaitingNotice {
+        agent: entry.agent,
+        project: entry.project.clone(),
+        detail,
+        terminal_hwnd: entry.terminal_hwnd,
+        claude_pid: entry.claude_pid,
+    })
+}
+
 /// A session's status accounting for staleness. Working/Waiting decay to Idle
 /// past the freshness window; Done is sticky.
 fn effective_status(s: &Session, now: Instant) -> Status {
@@ -572,7 +736,9 @@ pub fn decode_project_slug(slug: &str) -> String {
         .to_string()
 }
 
-fn project_from_cwd(cwd: &str) -> String {
+/// cwd path → display label (last path segment). Shared by the engine and the
+/// Claude transcript parser (claude_jsonl).
+pub fn project_from_cwd(cwd: &str) -> String {
     cwd.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
@@ -580,210 +746,38 @@ fn project_from_cwd(cwd: &str) -> String {
         .to_string()
 }
 
-// ---- JSONL parsing (full port of the Mac JSONLParser) -----------------------
+// ---- Shared transcript-parse types ------------------------------------------
+//
+// The Claude JSONL parser (claude_jsonl.rs) and the Codex rollout parser
+// (codex_rollout.rs) both produce a `ParseResult`, so the watcher → engine path
+// is identical for both agents. The per-format decoders live in their own
+// modules; only the shared result type and the file/cwd helpers live here.
 
-/// Everything a single pass over the new bytes produces.
+/// A coarse turn boundary parsed from a transcript. Only Codex emits these —
+/// its rollout brackets every turn with `task_started` / `task_complete`
+/// event_msg lines, the only reliable running/idle signal it has. Codex's hook
+/// stream can't carry it: there's no `Stop` hook, and built-in tools (web
+/// search, reasoning) fire no PreToolUse, so a hook-only Codex session would
+/// sit on the wrong status. Claude doesn't need this (its Stop hook covers it),
+/// so the Claude parser leaves `lifecycle` empty.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lifecycle {
+    TurnStarted,
+    TurnCompleted,
+}
+
+/// Everything a single pass over new transcript bytes produces.
 #[derive(Default)]
 pub struct ParseResult {
     pub project: Option<String>,
     pub messages: Vec<(Role, String)>,
     pub usages: Vec<(Usage, Model)>,
+    pub lifecycle: Vec<Lifecycle>,
 }
 
-#[derive(Deserialize)]
-struct WireLine {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    cwd: Option<String>,
-    message: Option<WireMessage>,
-}
-
-#[derive(Deserialize)]
-struct WireMessage {
-    model: Option<String>,
-    usage: Option<WireUsage>,
-    content: Option<WireContent>,
-}
-
-#[derive(Deserialize)]
-struct WireUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_creation: Option<WireCacheCreation>,
-}
-
-#[derive(Deserialize)]
-struct WireCacheCreation {
-    ephemeral_5m_input_tokens: Option<u64>,
-    ephemeral_1h_input_tokens: Option<u64>,
-}
-
-/// `message.content` is either a raw string or an array of typed blocks.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WireContent {
-    Text(String),
-    Blocks(Vec<WireBlock>),
-}
-
-#[derive(Deserialize)]
-struct WireBlock {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
-}
-
-impl WireContent {
-    fn text(&self) -> String {
-        match self {
-            WireContent::Text(s) => s.clone(),
-            WireContent::Blocks(blocks) => blocks
-                .iter()
-                .filter(|b| b.kind.as_deref() == Some("text"))
-                .filter_map(|b| b.text.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-}
-
-/// Read new bytes since last call and extract project + messages + usage. The
-/// incremental cursor (offsets) and lock/rotation handling match the Mac
-/// `JSONLParser.parseNew`.
-pub fn parse_new(path: &Path, offsets: &mut HashMap<PathBuf, u64>) -> ParseResult {
-    let mut result = ParseResult::default();
-
-    let Some(mut file) = open_with_retry(path) else {
-        return result;
-    };
-    let Ok(meta) = file.metadata() else {
-        return result;
-    };
-    let len = meta.len();
-
-    let mut start = offsets.get(path).copied().unwrap_or(0);
-    if len < start {
-        start = 0; // rotated/truncated
-    }
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return result;
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return result;
-    }
-
-    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
-        return result;
-    };
-    offsets.insert(path.to_path_buf(), start + last_nl as u64 + 1);
-
-    for line in buf[..=last_nl].split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        decode_line(line, &mut result);
-    }
-    result
-}
-
-fn decode_line(line: &[u8], result: &mut ParseResult) {
-    let Ok(parsed) = serde_json::from_slice::<WireLine>(line) else {
-        return;
-    };
-
-    if let Some(cwd) = &parsed.cwd {
-        result.project = Some(project_from_cwd(cwd));
-    }
-
-    // Cost: assistant messages carry a usage block.
-    if parsed.kind.as_deref() == Some("assistant") {
-        if let Some(msg) = &parsed.message {
-            if let Some(w) = &msg.usage {
-                let cache5m = w
-                    .cache_creation
-                    .as_ref()
-                    .and_then(|c| c.ephemeral_5m_input_tokens)
-                    .or(w.cache_creation_input_tokens)
-                    .unwrap_or(0);
-                let cache1h = w
-                    .cache_creation
-                    .as_ref()
-                    .and_then(|c| c.ephemeral_1h_input_tokens)
-                    .unwrap_or(0);
-                let usage = Usage {
-                    input_tokens: w.input_tokens.unwrap_or(0),
-                    output_tokens: w.output_tokens.unwrap_or(0),
-                    cache_create_5m_tokens: cache5m,
-                    cache_create_1h_tokens: cache1h,
-                    cache_read_tokens: w.cache_read_input_tokens.unwrap_or(0),
-                };
-                result
-                    .usages
-                    .push((usage, Model::from_wire(msg.model.as_deref())));
-            }
-        }
-    }
-
-    // Message text: user or assistant lines with non-empty, sanitized text.
-    let role = match parsed.kind.as_deref() {
-        Some("user") => Some(Role::User),
-        Some("assistant") => Some(Role::Assistant),
-        _ => None,
-    };
-    if let (Some(role), Some(msg)) = (role, &parsed.message) {
-        if let Some(content) = &msg.content {
-            let trimmed = content.text();
-            let trimmed = trimmed.trim();
-            if let Some(text) = sanitize_user_content(trimmed) {
-                if !text.is_empty() {
-                    result.messages.push((role, text));
-                }
-            }
-        }
-    }
-}
-
-/// Surface slash-command invocations / stdout as readable text; drop the
-/// `<local-command-caveat>` system block. Port of the Mac `sanitizeUserContent`.
-fn sanitize_user_content(text: &str) -> Option<String> {
-    if text.is_empty() {
-        return None;
-    }
-    if text.starts_with("<local-command-caveat>") {
-        return None;
-    }
-    if let Some(name) = extract_tag(text, "command-name") {
-        let args = extract_tag(text, "command-args").unwrap_or_default();
-        let args = args.trim();
-        return Some(if args.is_empty() {
-            name.trim().to_string()
-        } else {
-            format!("{} {}", name.trim(), args)
-        });
-    }
-    if let Some(stdout) = extract_tag(text, "local-command-stdout") {
-        let trimmed = stdout.trim();
-        return if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-    Some(text.to_string())
-}
-
-fn extract_tag(text: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = text.find(&open)? + open.len();
-    let end = text[start..].find(&close)? + start;
-    Some(text[start..end].to_string())
-}
-
-fn open_with_retry(path: &Path) -> Option<File> {
+/// Open a file with a short retry — transcript files can be briefly locked
+/// mid-write on Windows. Shared by both transcript parsers.
+pub fn open_with_retry(path: &Path) -> Option<File> {
     for attempt in 0..3 {
         match File::open(path) {
             Ok(f) => return Some(f),
