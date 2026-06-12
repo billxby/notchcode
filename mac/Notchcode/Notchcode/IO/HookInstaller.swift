@@ -1,13 +1,13 @@
-// Detects whether Notchcode's hook entries are wired into Claude Code's
-// ~/.claude/settings.json, and runs the bundled installer/uninstaller
-// scripts on demand.
+// Detects whether Notchcode's hook entries are wired into a coding agent's
+// config file, and runs the bundled installer/uninstaller scripts on demand.
 //
-// The check is the same shape as install-hooks.sh's match logic: look for
-// the loopback marker "127.0.0.1:9876" inside any hook command. We don't
-// parse the full Claude Code hook schema — the marker is the contract.
+// Per-agent: Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json)
+// are tracked and installed INDEPENDENTLY — installing or removing one never
+// touches the other. Both files share the same {hooks:{Event:[…]}} shape and
+// the same loopback marker "127.0.0.1:9876", so one detector handles both.
 //
-// State (`isInstalled`) is @Observable so the UI can react when the user
-// clicks Install and the file flips.
+// State is @Observable so the UI can show two independent install rows that
+// react when the user clicks Install and a file flips.
 
 import Foundation
 import Observation
@@ -17,37 +17,40 @@ import Observation
 final class HookInstaller {
     static let shared = HookInstaller()
 
-    /// Cached result of the last `refresh()` call. UI reads this; NotchcodeApp
-    /// warms it at launch and `runInstaller()` / `runUninstaller()` refresh
-    /// it after they finish.
-    private(set) var isInstalled: Bool = false
+    /// Per-agent install state, refreshed by `refresh()`. UI reads via
+    /// `isInstalled(_:)`. NotchcodeApp warms it at launch; the script runners
+    /// refresh after they finish.
+    private(set) var installed: [Agent: Bool] = [:]
 
-    /// Last error message from a script run, surfaced briefly in the UI.
-    /// Cleared on the next successful run.
-    private(set) var lastError: String? = nil
+    /// Per-agent last error from a script run, surfaced briefly in the UI.
+    private(set) var lastError: [Agent: String] = [:]
 
-    /// True only while a script is running, so the UI can disable buttons.
-    private(set) var isWorking: Bool = false
+    /// Agents with a script currently running, so the UI can disable buttons.
+    private(set) var working: Set<Agent> = []
 
     private init() {}
 
     // MARK: - Detection
 
-    /// Re-reads `~/.claude/settings.json` and flips `isInstalled`.
-    /// Cheap enough to call on demand (the file is tiny).
+    func isInstalled(_ agent: Agent) -> Bool { installed[agent] ?? false }
+    func lastError(_ agent: Agent) -> String? { lastError[agent] }
+    func isWorking(_ agent: Agent) -> Bool { working.contains(agent) }
+
+    /// Re-reads every agent's config file and flips `installed`. Cheap enough
+    /// to call on demand (the files are tiny).
     func refresh() {
-        isInstalled = Self.detectInstalled()
+        for agent in Agent.allCases {
+            installed[agent] = Self.detectInstalled(agent)
+        }
     }
 
-    /// Loopback marker — must match install-hooks.sh exactly. Any rename of
-    /// the port requires updating both. Kept as a single source of truth in
-    /// the script; this copy is a Swift-side mirror.
+    /// Loopback marker — must match install-hooks.sh exactly. Any change to the
+    /// port requires updating both. Single source of truth is the script; this
+    /// is the Swift-side mirror.
     static let marker = "127.0.0.1:9876"
 
-    private static func detectInstalled() -> Bool {
-        let path = (NSHomeDirectory() as NSString)
-            .appendingPathComponent(".claude/settings.json")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+    private static func detectInstalled(_ agent: Agent) -> Bool {
+        guard let data = try? Data(contentsOf: agent.hookConfigFile),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let hooks = json["hooks"] as? [String: Any]
         else { return false }
@@ -68,28 +71,27 @@ final class HookInstaller {
 
     // MARK: - Run scripts
 
-    /// Runs the bundled `install-hooks.sh`. Refreshes `isInstalled` on exit.
-    /// Errors surface in `lastError`.
-    func runInstaller() {
-        runScript(named: "install-hooks")
+    /// Runs the bundled `install-hooks.sh <agent>`. Refreshes state on exit.
+    func runInstaller(_ agent: Agent) {
+        runScript(named: "install-hooks", agent: agent)
     }
 
-    func runUninstaller() {
-        runScript(named: "uninstall-hooks")
+    func runUninstaller(_ agent: Agent) {
+        runScript(named: "uninstall-hooks", agent: agent)
     }
 
-    private func runScript(named scriptName: String) {
+    private func runScript(named scriptName: String, agent: Agent) {
         guard let scriptURL = Bundle.main.url(forResource: scriptName, withExtension: "sh") else {
-            lastError = "\(scriptName).sh not bundled with this build."
+            lastError[agent] = "\(scriptName).sh not bundled with this build."
             return
         }
-        isWorking = true
-        lastError = nil
+        working.insert(agent)
+        lastError[agent] = nil
 
-        Task.detached(priority: .userInitiated) { [scriptURL] in
+        Task.detached(priority: .userInitiated) { [scriptURL, agent] in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = [scriptURL.path]
+            task.arguments = [scriptURL.path, agent.rawValue]
             let outPipe = Pipe()
             let errPipe = Pipe()
             task.standardOutput = outPipe
@@ -114,8 +116,8 @@ final class HookInstaller {
             }
 
             await MainActor.run {
-                HookInstaller.shared.isWorking = false
-                HookInstaller.shared.lastError = errorMessage
+                HookInstaller.shared.working.remove(agent)
+                HookInstaller.shared.lastError[agent] = errorMessage
                 HookInstaller.shared.refresh()
             }
         }
@@ -124,9 +126,8 @@ final class HookInstaller {
     // MARK: - One-line install command (for users without the .app)
 
     /// The public curl one-liner — serves the canonical script straight from
-    /// the repo, so there's a single source of truth with the bundled copy
-    /// the in-app "Install hooks…" button runs. Matching uninstaller lives at
-    /// the same path: .../Resources/uninstall-hooks.sh.
-    static let oneLineInstallCommand =
-        "curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash"
+    /// the repo. Pass the agent as the script argument.
+    static func oneLineInstallCommand(_ agent: Agent) -> String {
+        "curl -fsSL https://raw.githubusercontent.com/billxby/notchcode/main/mac/Notchcode/Notchcode/Resources/install-hooks.sh | bash -s -- \(agent.rawValue)"
+    }
 }

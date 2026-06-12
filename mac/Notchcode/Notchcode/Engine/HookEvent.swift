@@ -25,6 +25,11 @@ struct HookEvent: Equatable {
     }
 
     let kind: Kind
+    /// Which agent fired this hook. Determined from the URL path segment the
+    /// server received (/claude/hook/… vs /codex/hook/…), NOT the payload —
+    /// the installer tags it at install time. Codex's stdin schema matches
+    /// Claude's for these fields, so the rest of decode() is shared verbatim.
+    let agent: Agent
     let sessionId: String?      // payload key: "session_id"
     let projectPath: String?    // payload key: "cwd" or "project_dir"
     let toolName: String?       // payload key: "tool_name" — only present on PreToolUse / PostToolUse
@@ -44,7 +49,7 @@ struct HookEvent: Equatable {
     /// Parse a Claude Code hook payload. Returns a HookEvent even if the JSON
     /// is partially malformed — missing optional fields just become nil. We
     /// only fully fail (return nil) if the body is unrecoverable garbage.
-    static func decode(kind: Kind, body: Data, claudePid: Int32? = nil, receivedAt: Date = .now) -> HookEvent {
+    static func decode(kind: Kind, agent: Agent = .claude, body: Data, claudePid: Int32? = nil, receivedAt: Date = .now) -> HookEvent {
         // Inner structs match Claude's snake_case keys verbatim.
         // Optional everywhere so any subset works.
         struct ToolInput: Decodable {
@@ -84,6 +89,7 @@ struct HookEvent: Equatable {
 
         return HookEvent(
             kind: kind,
+            agent: agent,
             sessionId: payload?.session_id,
             // Claude has used both keys across versions; prefer project_dir
             // when present, fall back to cwd.

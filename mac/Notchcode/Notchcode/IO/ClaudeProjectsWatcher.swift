@@ -1,5 +1,6 @@
-// Watches ~/.claude/projects/ recursively and pings the engine whenever a
-// .jsonl file is created or modified.
+// Watches Claude Code's ~/.claude/projects/ recursively and pings the engine
+// whenever a .jsonl file is created or modified. The Claude counterpart to
+// CodexSessionsWatcher.
 //
 // Why FSEventStream and not Foundation's URL.resourceValues / DispatchSource?
 //   - FSEventStream is the *macOS-native* file-system notification API. It
@@ -13,8 +14,8 @@
 import Foundation
 
 @MainActor
-final class ProjectsWatcher {
-    static let shared = ProjectsWatcher()
+final class ClaudeProjectsWatcher {
+    static let shared = ClaudeProjectsWatcher()
     private init() {}
 
     private var stream: FSEventStreamRef?
@@ -47,7 +48,7 @@ final class ProjectsWatcher {
             // takeUnretainedValue is correct because we passUnretained below;
             // ARC does not give the C API a retain — we keep `self` alive via
             // the singleton.
-            let watcher = Unmanaged<ProjectsWatcher>.fromOpaque(info).takeUnretainedValue()
+            let watcher = Unmanaged<ClaudeProjectsWatcher>.fromOpaque(info).takeUnretainedValue()
 
             // `paths` is a CFArray of CFString. Bridge to Swift [String].
             let pathArray = unsafeBitCast(paths, to: NSArray.self) as! [String]
@@ -132,10 +133,10 @@ final class ProjectsWatcher {
             // they'd be pruned on the engine's first read anyway, no point
             // shipping them across the actor hop. (A file touched this week
             // can still open with week-old lines.)
-            var allCosts: [JSONLParser.CostEvent] = []
-            var allMessages: [JSONLParser.MessageEvent] = []
+            var allCosts: [CostEvent] = []
+            var allMessages: [MessageEvent] = []
             for (url, project) in recentFiles {
-                let result = await JSONLParser.shared.parseNew(at: url, project: project)
+                let result = await ClaudeJSONLParser.shared.parseNew(at: url, project: project)
                 allCosts.append(contentsOf: result.costs)
                 allMessages.append(contentsOf: result.messages)
             }
@@ -205,7 +206,7 @@ final class ProjectsWatcher {
         // because JSONL files can be megabytes after a long session and
         // we don't want to stutter the notch animation.
         Task.detached(priority: .utility) { [weak engine = self.engine] in
-            let result = await JSONLParser.shared.parseNew(at: url, project: project)
+            let result = await ClaudeJSONLParser.shared.parseNew(at: url, project: project)
             guard !result.costs.isEmpty || !result.messages.isEmpty, let engine else { return }
             await MainActor.run {
                 for ev in result.costs {

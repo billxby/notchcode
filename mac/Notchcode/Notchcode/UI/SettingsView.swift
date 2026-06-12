@@ -38,6 +38,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     usageSection
+                    notificationsSection
                     appearanceSection
                     integrationSection
                     systemAccessSection
@@ -124,6 +125,51 @@ struct SettingsView: View {
             }
             // Unlike the other cards, nothing in here has a Spacer() row to
             // stretch the card — force full width to match.
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - Notifications
+
+    private var notificationsSection: some View {
+        SectionCard(title: "Notifications") {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: Binding(
+                        get: { settings.notifyOnWaiting },
+                        set: { settings.notifyOnWaiting = $0 }
+                    )) {
+                        Text("Notify when an agent needs input")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+
+                    Text("Post a banner when Claude or Codex blocks on an approval. Click it to jump to that terminal window.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: Binding(
+                        get: { settings.focusTerminalOnWaiting },
+                        set: { settings.focusTerminalOnWaiting = $0 }
+                    )) {
+                        Text("Focus terminal automatically")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+
+                    Text("Bring the agent's terminal window to the front the moment it starts waiting, without clicking. Precise-window focus needs Accessibility access (below).")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -290,61 +336,76 @@ struct SettingsView: View {
 
     // MARK: - Integration
 
+    /// One card holding an independent install row per agent. Installing or
+    /// removing one agent's hooks never touches the other's config file, so a
+    /// user can monitor Claude Code and Codex together or either alone.
     private var integrationSection: some View {
-        SectionCard(title: "Claude Code integration") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: installer.isInstalled ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(installer.isInstalled ? .green : .yellow)
-                    Text(installer.isInstalled ? "Hooks installed" : "Hooks not installed")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.92))
-                    Spacer()
-                }
-                Text(installer.isInstalled
-                     ? "Notchcode is wired into ~/.claude/settings.json. Reinstall to refresh after a Claude Code update."
-                     : "Notchcode can't see your Claude Code sessions until the hook entries are added.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .fixedSize(horizontal: false, vertical: true)
+        SectionCard(title: "Agent integration") {
+            VStack(alignment: .leading, spacing: 16) {
+                agentIntegrationRow(.claude)
+                Divider().overlay(.white.opacity(0.08))
+                agentIntegrationRow(.codex)
+            }
+        }
+    }
 
-                HStack(spacing: 8) {
-                    if installer.isInstalled {
-                        Button("Reinstall") { installer.runInstaller() }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.blue.opacity(0.85))
-                            .controlSize(.small)
-                            .disabled(installer.isWorking)
-                        Button("Remove") { installer.runUninstaller() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(installer.isWorking)
-                    } else {
-                        Button {
-                            installer.runInstaller()
-                        } label: {
-                            HStack(spacing: 4) {
-                                if installer.isWorking {
-                                    ProgressView().controlSize(.mini).tint(.white)
-                                }
-                                Text(installer.isWorking ? "Installing…" : "Install hooks")
-                            }
-                        }
+    @ViewBuilder
+    private func agentIntegrationRow(_ agent: Agent) -> some View {
+        let isInstalled = installer.isInstalled(agent)
+        let isWorking = installer.isWorking(agent)
+        let configName = agent == .claude ? "~/.claude/settings.json" : "~/.codex/hooks.json"
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: isInstalled ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isInstalled ? .green : .yellow)
+                Text("\(agent.displayName) — \(isInstalled ? "hooks installed" : "hooks not installed")")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+                Spacer()
+            }
+            Text(isInstalled
+                 ? "Notchcode is wired into \(configName). Reinstall to refresh after a \(agent.displayName) update."
+                 : "Notchcode can't see your \(agent.displayName) sessions until the hook entries are added to \(configName).")
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.6))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                if isInstalled {
+                    Button("Reinstall") { installer.runInstaller(agent) }
                         .buttonStyle(.borderedProminent)
-                        .tint(.yellow.opacity(0.85))
+                        .tint(.blue.opacity(0.85))
                         .controlSize(.small)
-                        .disabled(installer.isWorking)
+                        .disabled(isWorking)
+                    Button("Remove") { installer.runUninstaller(agent) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(isWorking)
+                } else {
+                    Button {
+                        installer.runInstaller(agent)
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isWorking {
+                                ProgressView().controlSize(.mini).tint(.white)
+                            }
+                            Text(isWorking ? "Installing…" : "Install hooks")
+                        }
                     }
-                    Spacer()
+                    .buttonStyle(.borderedProminent)
+                    .tint(.yellow.opacity(0.85))
+                    .controlSize(.small)
+                    .disabled(isWorking)
                 }
+                Spacer()
+            }
 
-                if let err = installer.lastError {
-                    Text(err)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.red.opacity(0.85))
-                        .lineLimit(3)
-                }
+            if let err = installer.lastError(agent) {
+                Text(err)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.red.opacity(0.85))
+                    .lineLimit(3)
             }
         }
     }

@@ -1,10 +1,13 @@
 // Status glyphs for the pill, session rows, and detail header — the web port
 // of the Mac NotchView's StatusIndicator family. Working renders the
-// user-selected animation (spinner / pulse / mascot), all in Claude orange;
-// every other state is a quiet glyph.
+// user-selected animation (spinner / pulse / mascot) in Claude orange — but
+// Codex sessions never use the two Claude-branded motions (the CLI flower and
+// the walking mascot); they always show the pulsing dot in Codex's accent so
+// the animation reads as "this is Codex, not Claude."
 
 import { useEffect, useState } from "react";
-import type { Status, WorkingAnimation } from "./types";
+import type { Agent, Status, WorkingAnimation } from "./types";
+import { AGENT_ACCENT } from "./types";
 
 // ---- Working animations -----------------------------------------------------
 
@@ -57,16 +60,22 @@ function WorkingGlyph({ anim }: { anim: WorkingAnimation }) {
 // ---- Status indicator -------------------------------------------------------
 
 /**
- * The pill's leading glyph. `anim` selects the working motion. `forceColor`
- * (brake) overrides everything with a static dot so the pill reads "stop".
+ * The pill's leading glyph. `anim` selects the working motion. `agent` colors
+ * the working animation by agent (Claude → orange, Codex → its accent) and
+ * forces Codex onto the pulsing dot — the two Claude-branded motions never
+ * stand in for Codex. Omit `agent` (e.g. the agent-agnostic aggregate pill) to
+ * keep the Claude default. `forceColor` (brake) overrides everything with a
+ * static dot so the pill reads "stop".
  */
 export function StatusIndicator({
   status,
   anim,
+  agent,
   forceColor,
 }: {
   status: Status;
   anim: WorkingAnimation;
+  agent?: Agent;
   forceColor?: string;
 }) {
   if (forceColor) {
@@ -79,7 +88,15 @@ export function StatusIndicator({
   let inner;
   switch (status) {
     case "working":
-      inner = <WorkingGlyph anim={anim} />;
+      // Codex always pulses in its own color; Claude uses the chosen motion.
+      inner =
+        agent === "codex" ? (
+          <span className="glyph-pulse" style={{ color: AGENT_ACCENT.codex }}>
+            ✱
+          </span>
+        ) : (
+          <WorkingGlyph anim={anim} />
+        );
       break;
     case "waiting":
       inner = <span className="glyph-waiting">!</span>;

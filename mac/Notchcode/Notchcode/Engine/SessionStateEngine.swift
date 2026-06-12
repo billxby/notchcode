@@ -1,7 +1,7 @@
 // The single source of truth for "what are Claude Code sessions doing right now."
 //
 // Two input pipelines feed this engine:
-//   1. ProjectsWatcher (FSEventStream) → sessionFileTouched(...) — coarse,
+//   1. ClaudeProjectsWatcher (FSEventStream) → sessionFileTouched(...) — coarse,
 //      "this session is alive" signal. Bumps lastUpdate; doesn't change status.
 //   2. HookServer (NWListener) → handleHookEvent(...) — precise per-event signal
 //      from Claude Code's hook system. Sets explicit status (.working / .waiting / etc.)
@@ -45,6 +45,10 @@ final class SessionStateEngine {
 
     struct Session: Identifiable, Equatable {
         let id: String
+        /// Which coding agent this session belongs to (Claude Code or Codex).
+        /// Drives per-agent UI (badge/accent), the pricing table used for its
+        /// cost, and the process name used for its liveness check.
+        var agent: Agent = .claude
         var project: String
         var lastUpdate: Date
         var status: Status = .idle
@@ -76,7 +80,7 @@ final class SessionStateEngine {
     }
 
     /// One text turn in a conversation. Tool calls, results, and image
-    /// blocks are deliberately excluded — see JSONLParser.MessageEvent.
+    /// blocks are deliberately excluded — see MessageEvent.
     struct Message: Identifiable, Equatable {
         let id: UUID = UUID()
         let role: Role
@@ -258,23 +262,33 @@ final class SessionStateEngine {
     /// File watcher signal: "this session's JSONL was just modified."
     /// Doesn't override hook-supplied status; only bumps lastUpdate so the
     /// session keeps showing up in `activeSessions`.
-    func sessionFileTouched(sessionId: String, project: String, at date: Date = .now) {
-        if var existing = sessions[sessionId] {
+    func sessionFileTouched(sessionId: String, agent: Agent = .claude, project: String, at date: Date = .now) {
+        let key = agent.sessionKey(sessionId)
+        if var existing = sessions[key] {
             existing.lastUpdate = date
-            existing.project = project
-            sessions[sessionId] = existing
+            // Don't blank a known project: Codex sessions learn their project
+            // from a session_meta line parsed later, so the file-touch signal
+            // may arrive with an empty project first.
+            if !project.isEmpty { existing.project = project }
+            sessions[key] = existing
         } else {
-            sessions[sessionId] = Session(id: sessionId, project: project, lastUpdate: date)
+            sessions[key] = Session(id: key, agent: agent, project: project, lastUpdate: date)
         }
     }
 
-    /// Hook signal: a precise lifecycle event from Claude Code.
+    /// Read-only lookup by namespaced session key. Used by the notification
+    /// click handler to resolve a banner back to its session + terminal.
+    func session(id: String) -> Session? { sessions[id] }
+
+    /// Hook signal: a precise lifecycle event from a coding agent.
     func handleHookEvent(_ event: HookEvent) {
-        // Sessions without an ID are still useful (Claude Code generally
-        // includes session_id, but be defensive) — bucket them all together.
-        let id = event.sessionId ?? "anonymous"
+        // Sessions without an ID are still useful (agents generally include
+        // session_id, but be defensive) — bucket them all together, still
+        // namespaced per agent so Claude's and Codex's "anonymous" don't merge.
+        let id = event.agent.sessionKey(event.sessionId ?? "anonymous")
         let project = Self.decodeProject(event.projectPath)
-        var session = sessions[id] ?? Session(id: id, project: project, lastUpdate: event.receivedAt)
+        var session = sessions[id] ?? Session(id: id, agent: event.agent, project: project, lastUpdate: event.receivedAt)
+        session.agent = event.agent
         let wasWaiting = (session.status == .waiting)
         session.lastUpdate = event.receivedAt
         if !project.isEmpty { session.project = project }
@@ -289,15 +303,25 @@ final class SessionStateEngine {
 
         switch event.kind {
         case .preToolUse:
-            session.status = .working(tool: event.toolName, detail: event.toolDetail)
-            // Append to the history feed, evicting the oldest if we'd exceed
-            // the cap. Only PreToolUse contributes — PostToolUse and Stop
-            // describe state transitions, not new invocations.
-            if let name = event.toolName {
-                let action = Action(toolName: name, detail: event.toolDetail, timestamp: event.receivedAt)
-                session.recentActions.append(action)
-                if session.recentActions.count > Self.actionHistoryLimit {
-                    session.recentActions.removeFirst(session.recentActions.count - Self.actionHistoryLimit)
+            // Codex surfaces "ask the user a question" and "approve this
+            // command/patch" as ordinary tool calls (request_user_input,
+            // exec_approval_request, …) rather than a PermissionRequest hook —
+            // so a naive PreToolUse would read as `.working` and we'd never
+            // notify. Detect those blocking tools and treat them like a
+            // permission request: the agent is parked until the user answers.
+            if let name = event.toolName, Self.isBlockingTool(name) {
+                enterWaiting(&session, id: id, wasWaiting: wasWaiting, toolDetail: event.toolDetail)
+            } else {
+                session.status = .working(tool: event.toolName, detail: event.toolDetail)
+                // Append to the history feed, evicting the oldest if we'd exceed
+                // the cap. Only PreToolUse contributes — PostToolUse and Stop
+                // describe state transitions, not new invocations.
+                if let name = event.toolName {
+                    let action = Action(toolName: name, detail: event.toolDetail, timestamp: event.receivedAt)
+                    session.recentActions.append(action)
+                    if session.recentActions.count > Self.actionHistoryLimit {
+                        session.recentActions.removeFirst(session.recentActions.count - Self.actionHistoryLimit)
+                    }
                 }
             }
         case .postToolUse:
@@ -316,19 +340,10 @@ final class SessionStateEngine {
             // resumed session (`claude -r`) can move to a different terminal.
             session.terminalBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         case .permissionRequest:
-            // Real "waiting on you" — Claude is paused, blocked on the user
-            // approving a tool action. Stays waiting until the next
-            // preToolUse (granted) or Stop (denied/cancelled) flips it.
-            session.status = .waiting
-            // Capture the frontmost app at hook fire time so the notch can
-            // activate it on tap. Claude Code is synchronously blocked on
-            // this hook, so whatever's frontmost right now is almost always
-            // the terminal running `claude`. Only refresh on the entry edge —
-            // re-firing PermissionRequest shouldn't overwrite the recorded
-            // terminal if the user has since switched away.
-            if !wasWaiting {
-                session.terminalBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            }
+            // Real "waiting on you" — the agent is paused, blocked on the user
+            // approving a tool action. Stays waiting until the next preToolUse
+            // (granted) or Stop (denied/cancelled) flips it.
+            enterWaiting(&session, id: id, wasWaiting: wasWaiting, toolDetail: event.toolDetail)
         case .stop:
             // Sticky by design: the checkmark persists until the user taps
             // the pill (acknowledgeDone) or the session does new work. A 2s
@@ -338,14 +353,71 @@ final class SessionStateEngine {
             session.status = .done
         }
 
+        // Left the waiting state (approval granted → preToolUse, or denied /
+        // turn ended → stop): pull the now-stale "needs input" banner so
+        // Notification Center doesn't keep a card the user already resolved.
+        if wasWaiting, session.status != .waiting {
+            Notifier.shared.clearWaiting(id: id)
+        }
+
         sessions[id] = session
+    }
+
+    /// Transition a session into `.waiting` and, on the entry edge, capture the
+    /// terminal, post a notification banner, and (if enabled) raise the
+    /// terminal. Shared by the PermissionRequest hook and Codex's blocking
+    /// tool calls (request_user_input / *_approval_request), which mean the
+    /// same thing: the agent is parked until the user answers.
+    ///
+    /// `wasWaiting` guards the side effects to the entry edge so a re-fired
+    /// hook (or a repeated PreToolUse) doesn't re-notify or re-steal focus.
+    /// The frontmost app at fire time is almost always the terminal running
+    /// the agent — it's synchronously blocked on this hook — so it's our best
+    /// terminal capture.
+    private func enterWaiting(
+        _ session: inout Session,
+        id: String,
+        wasWaiting: Bool,
+        toolDetail: String?
+    ) {
+        session.status = .waiting
+        guard !wasWaiting else { return }
+        session.terminalBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        Notifier.shared.sessionNeedsInput(
+            id: id,
+            agent: session.agent,
+            project: session.project,
+            toolDetail: toolDetail
+        )
+        if AppSettings.shared.focusTerminalOnWaiting,
+           let bundleID = session.terminalBundleID {
+            TerminalFocus.focus(bundleID: bundleID, projectHint: session.project)
+        }
+    }
+
+    /// Tool names that mean "the agent is blocked on the user," not "the agent
+    /// is doing work." Codex models its interactive prompts as tool calls, so
+    /// these arrive as PreToolUse hooks; without this they'd read as `.working`
+    /// and never trigger a notification. Claude routes the same intent through
+    /// the PermissionRequest hook instead, so this set is Codex-shaped.
+    nonisolated private static func isBlockingTool(_ name: String) -> Bool {
+        switch name {
+        case "request_user_input",
+             "request_permissions",
+             "exec_approval_request",
+             "apply_patch_approval_request",
+             "elicitation_request":
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Usage ingestion
 
-    /// Called by ProjectsWatcher for each parsed assistant message. Appends
+    /// Called by ClaudeProjectsWatcher for each parsed assistant message. Appends
     /// to the rolling window AND updates per-session running totals. Caller
-    /// is responsible for not double-counting (JSONLParser handles that via
+    /// is responsible for not double-counting (ClaudeJSONLParser handles that via
     /// per-file byte offsets).
     ///
     /// Session-row gating: the weekly catch-up replays up to 7 days of
@@ -356,47 +428,94 @@ final class SessionStateEngine {
     /// create the row within seconds for anything actually running).
     func recordUsage(
         sessionId: String,
+        agent: Agent = .claude,
         project: String,
         tokens: Int,
         usd: Double,
         at date: Date = .now
     ) {
+        let key = agent.sessionKey(sessionId)
         // Buffer is event-level; bounded by pruneExpired() on every read.
-        usageBuffer.append(UsageEvent(sessionId: sessionId, tokens: tokens, usd: usd, at: date))
+        usageBuffer.append(UsageEvent(sessionId: key, tokens: tokens, usd: usd, at: date))
         weeklyTokensTotal += tokens
         weeklyDollarsTotal += usd
 
         let isRecent = Date().timeIntervalSince(date) < staleTimeout
-        guard var session = sessions[sessionId]
-            ?? (isRecent ? Session(id: sessionId, project: project, lastUpdate: date) : nil)
+        guard var session = sessions[key]
+            ?? (isRecent ? Session(id: key, agent: agent, project: project, lastUpdate: date) : nil)
         else { return }
         if !project.isEmpty { session.project = project }
         session.costUSD += usd
-        sessions[sessionId] = session
+        sessions[key] = session
     }
 
     /// v0.95 — append a parsed text message to the session's rolling buffer.
     /// Capped at `messageHistoryLimit`; oldest entries evicted FIFO. Caller
-    /// is responsible for de-duping via JSONLParser's per-file byte cursor.
+    /// is responsible for de-duping via ClaudeJSONLParser's per-file byte cursor.
     /// Same session-row gating as `recordUsage` — week-old transcripts
     /// shouldn't materialize dead sessions in the panel.
     func recordMessage(
         sessionId: String,
+        agent: Agent = .claude,
         project: String,
         role: Message.Role,
         text: String,
         at date: Date = .now
     ) {
+        let key = agent.sessionKey(sessionId)
         let isRecent = Date().timeIntervalSince(date) < staleTimeout
-        guard var session = sessions[sessionId]
-            ?? (isRecent ? Session(id: sessionId, project: project, lastUpdate: date) : nil)
+        guard var session = sessions[key]
+            ?? (isRecent ? Session(id: key, agent: agent, project: project, lastUpdate: date) : nil)
         else { return }
         if !project.isEmpty { session.project = project }
         session.messages.append(Message(role: role, text: text, timestamp: date))
         if session.messages.count > Self.messageHistoryLimit {
             session.messages.removeFirst(session.messages.count - Self.messageHistoryLimit)
         }
-        sessions[sessionId] = session
+        sessions[key] = session
+    }
+
+    /// Codex-only: a coarse turn boundary parsed from the rollout transcript.
+    /// `task_started` → `.working`, `task_complete` → `.done`. This is Codex's
+    /// running/idle backbone because its hook stream can't provide one — Codex
+    /// fires no `Stop` hook, and built-in tools (web search, reasoning) fire no
+    /// PreToolUse hook, so a hook-only Codex session never leaves `.idle`. When
+    /// hooks DO fire (shell / apply_patch), they still enrich `.working` with
+    /// the specific tool + detail; this just guarantees the working/done
+    /// bracket exists at all.
+    ///
+    /// Recency-gated like recordUsage/recordMessage so the 7-day catch-up
+    /// replay can't resurrect a week of old turns as live sessions — but a
+    /// turn that started <10 min ago (e.g. Notchcode launched mid-turn) is
+    /// recent enough to correctly show as working.
+    func recordLifecycle(
+        sessionId: String,
+        agent: Agent = .codex,
+        project: String,
+        kind: LifecycleEvent.Kind,
+        at date: Date = .now
+    ) {
+        guard Date().timeIntervalSince(date) < staleTimeout else { return }
+        let key = agent.sessionKey(sessionId)
+        var session = sessions[key]
+            ?? Session(id: key, agent: agent, project: project, lastUpdate: date)
+        if !project.isEmpty { session.project = project }
+        session.lastUpdate = date
+        // A fresh turn boundary means the process is alive; un-end it the same
+        // way a hook event does (covers a resumed/relaunched Codex session).
+        session.ended = false
+        // A turn boundary means any pending approval is resolved. Codex fires
+        // no Stop hook, so if the approval cleared without a follow-up
+        // PreToolUse (e.g. the turn finished on a built-in tool), the transcript
+        // is the only thing that pulls the stale banner.
+        if session.status == .waiting {
+            Notifier.shared.clearWaiting(id: key)
+        }
+        switch kind {
+        case .turnStarted:   session.status = .working(tool: nil, detail: nil)
+        case .turnCompleted: session.status = .done
+        }
+        sessions[key] = session
     }
 
     /// User clicked "Dismiss for today" — quiet the brake until the calendar
@@ -518,6 +637,26 @@ final class SessionStateEngine {
         return .idle
     }
 
+    /// The agent driving the aggregate when it's `.working`, so the collapsed
+    /// pill can tint its spinner by agent (and force Codex onto the pulse).
+    /// Prefers the agent of the named-working session — the same one whose
+    /// tool/detail the pill shows — then the first plain-working session. nil
+    /// when nothing is working (the pill's non-working glyphs are agent-neutral).
+    /// Mixed agents resolve to whichever wins that priority, deterministically.
+    var aggregateWorkingAgent: Agent? {
+        _ = clockTick
+        var named: Agent? = nil
+        var plain: Agent? = nil
+        for s in activeSessions where !s.ended {
+            switch s.status {
+            case .working(_?, _):  if named == nil { named = s.agent }
+            case .working(nil, _): if plain == nil { plain = s.agent }
+            default: break
+            }
+        }
+        return named ?? plain
+    }
+
     // MARK: - Internals
 
     /// Turn `/Users/you/notchcode` into `notchcode` for display. Full path
@@ -552,21 +691,26 @@ final class SessionStateEngine {
             print("[Notchcode] Per-PID liveness check ended one or more sessions.")
         }
 
-        // Legacy fallback for sessions that never reported a PID. If no
-        // claude process is alive *anywhere*, those sessions are definitely
-        // dead — mark them ended too.
-        let untracked = sessions.values.contains { !$0.ended && $0.claudePid == nil }
-        guard untracked else { return }
-
-        let anyAlive = await Self.isAnyClaudeProcessRunning()
-        guard !anyAlive else { return }
-
-        for (id, var session) in sessions where !session.ended && session.claudePid == nil {
-            session.ended = true
-            session.status = .idle
-            sessions[id] = session
+        // Legacy fallback for sessions that never reported a PID. Done PER
+        // AGENT: if no `claude` process is alive anywhere we end PID-less
+        // Claude sessions, and likewise `codex` for Codex sessions — a live
+        // Codex process must not keep a dead Claude session on screen.
+        let untrackedAgents = Set(
+            sessions.values
+                .filter { !$0.ended && $0.claudePid == nil }
+                .map(\.agent)
+        )
+        for agent in untrackedAgents {
+            let anyAlive = await Self.isAnyProcessRunning(named: agent.processName)
+            guard !anyAlive else { continue }
+            for (id, var session) in sessions
+            where !session.ended && session.claudePid == nil && session.agent == agent {
+                session.ended = true
+                session.status = .idle
+                sessions[id] = session
+            }
+            print("[Notchcode] No `\(agent.processName)` processes found — ending PID-less \(agent.displayName) sessions.")
         }
-        print("[Notchcode] No `claude` processes found — ending PID-less sessions.")
     }
 
     /// `kill(pid, 0)` is the canonical POSIX liveness probe — sends no
@@ -576,17 +720,18 @@ final class SessionStateEngine {
         return kill(pid, 0) == 0 || errno == EPERM
     }
 
-    /// `pgrep claude` — substring match against process names. Exit code 0 = at
+    /// `pgrep <name>` — substring match against process names. Exit code 0 = at
     /// least one match. We deliberately keep the match loose so installations
-    /// like `claude-1m` or `claude-code` also count as "alive."
+    /// like `claude-1m` or `claude-code` (and `codex`/`codex-cli`) also count
+    /// as "alive."
     ///
     /// Runs off the main actor via Task.detached because `Process.run()` blocks
     /// until the child exits (typically <5ms for pgrep, but never on main).
-    nonisolated private static func isAnyClaudeProcessRunning() async -> Bool {
+    nonisolated private static func isAnyProcessRunning(named name: String) async -> Bool {
         await Task.detached(priority: .utility) {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            task.arguments = ["claude"]
+            task.arguments = [name]
             task.standardOutput = Pipe()
             task.standardError = Pipe()
             do {

@@ -9,8 +9,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type AppSettings,
+  type Agent,
   type PlanTier,
   type WorkingAnimation,
+  AGENT_LABELS,
   PLAN_LABELS,
   PLAN_DEFAULT_BUDGET,
   WORKING_ANIM_LABELS,
@@ -73,43 +75,58 @@ export default function SettingsView({
 }) {
   const patch = (p: Partial<AppSettings>) => onChange({ ...settings, ...p });
 
-  // Hook install state.
-  const [installed, setInstalled] = useState(false);
-  const [hookBusy, setHookBusy] = useState(false);
-  const [hookErr, setHookErr] = useState<string | null>(null);
+  // Per-agent hook install state — Claude and Codex install independently.
+  const [installed, setInstalled] = useState<Record<Agent, boolean>>({
+    claude: false,
+    codex: false,
+  });
+  const [hookBusy, setHookBusy] = useState<Agent | null>(null);
+  const [hookErr, setHookErr] = useState<Record<Agent, string | null>>({
+    claude: null,
+    codex: null,
+  });
   // Launch-at-login (owned by the system; re-read after every toggle).
   const [autostart, setAutostart] = useState(false);
   const [version, setVersion] = useState("");
 
+  async function refreshInstalled(agent: Agent) {
+    try {
+      const v = await invoke<boolean>("hooks_installed", { agent });
+      setInstalled((prev) => ({ ...prev, [agent]: v }));
+    } catch {
+      /* leave prior value */
+    }
+  }
+
   useEffect(() => {
-    invoke<boolean>("hooks_installed").then(setInstalled).catch(() => {});
+    (["claude", "codex"] as Agent[]).forEach(refreshInstalled);
     invoke<boolean>("autostart_enabled").then(setAutostart).catch(() => {});
     getVersion().then(setVersion).catch(() => {});
   }, []);
 
-  async function runInstall() {
-    setHookBusy(true);
-    setHookErr(null);
+  async function runInstall(agent: Agent) {
+    setHookBusy(agent);
+    setHookErr((prev) => ({ ...prev, [agent]: null }));
     try {
-      await invoke<string>("install_hooks");
-      setInstalled(await invoke<boolean>("hooks_installed"));
+      await invoke<string>("install_hooks", { agent });
+      await refreshInstalled(agent);
     } catch (e) {
-      setHookErr(String(e));
+      setHookErr((prev) => ({ ...prev, [agent]: String(e) }));
     } finally {
-      setHookBusy(false);
+      setHookBusy(null);
     }
   }
 
-  async function runRemove() {
-    setHookBusy(true);
-    setHookErr(null);
+  async function runRemove(agent: Agent) {
+    setHookBusy(agent);
+    setHookErr((prev) => ({ ...prev, [agent]: null }));
     try {
-      await invoke<string>("uninstall_hooks");
-      setInstalled(await invoke<boolean>("hooks_installed"));
+      await invoke<string>("uninstall_hooks", { agent });
+      await refreshInstalled(agent);
     } catch (e) {
-      setHookErr(String(e));
+      setHookErr((prev) => ({ ...prev, [agent]: String(e) }));
     } finally {
-      setHookBusy(false);
+      setHookBusy(null);
     }
   }
 
@@ -292,45 +309,87 @@ export default function SettingsView({
           </div>
         </Section>
 
-        {/* Integration */}
-        <Section title="Claude Code integration">
+        {/* Integration — one independent install row per agent */}
+        <Section title="Agent integration">
+          {(["claude", "codex"] as Agent[]).map((agent, idx) => {
+            const isInstalled = installed[agent];
+            const busy = hookBusy === agent;
+            const configName =
+              agent === "claude" ? "~/.claude/settings.json" : "~/.codex/hooks.json";
+            return (
+              <div
+                key={agent}
+                className="agent-integration"
+                style={idx > 0 ? { marginTop: 16 } : undefined}
+              >
+                <div className="set-row">
+                  <span className={`status-chip ${isInstalled ? "ok" : "warn"}`}>
+                    {AGENT_LABELS[agent]} —{" "}
+                    {isInstalled ? "✓ hooks installed" : "! hooks not installed"}
+                  </span>
+                </div>
+                <div className="set-help">
+                  {isInstalled
+                    ? `Notchcode is wired into ${configName}. Reinstall to refresh after a ${AGENT_LABELS[agent]} update.`
+                    : `Notchcode can't see your ${AGENT_LABELS[agent]} sessions until the hook entries are added to ${configName}.`}
+                </div>
+                <div className="set-actions">
+                  {isInstalled ? (
+                    <>
+                      <button
+                        className="btn primary"
+                        disabled={busy}
+                        onClick={() => runInstall(agent)}
+                      >
+                        Reinstall
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => runRemove(agent)}
+                      >
+                        Remove
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="btn accent"
+                      disabled={busy}
+                      onClick={() => runInstall(agent)}
+                    >
+                      {busy ? "Installing…" : "Install hooks"}
+                    </button>
+                  )}
+                </div>
+                {hookErr[agent] && <div className="set-error">{hookErr[agent]}</div>}
+              </div>
+            );
+          })}
+        </Section>
+
+        {/* Notifications */}
+        <Section title="Notifications">
           <div className="set-row">
-            <span
-              className={`status-chip ${installed ? "ok" : "warn"}`}
-            >
-              {installed ? "✓ Hooks installed" : "! Hooks not installed"}
-            </span>
+            <span className="set-label">Notify when an agent needs input</span>
+            <Toggle
+              checked={settings.notify_on_waiting}
+              onChange={(v) => patch({ notify_on_waiting: v })}
+            />
           </div>
           <div className="set-help">
-            {installed
-              ? "Notchcode is wired into ~/.claude/settings.json. Reinstall to refresh after a Claude Code update."
-              : "Notchcode can't see your Claude Code sessions until the hook entries are added."}
+            Show a toast when Claude or Codex blocks on an approval or question.
           </div>
-          <div className="set-actions">
-            {installed ? (
-              <>
-                <button
-                  className="btn primary"
-                  disabled={hookBusy}
-                  onClick={runInstall}
-                >
-                  Reinstall
-                </button>
-                <button className="btn" disabled={hookBusy} onClick={runRemove}>
-                  Remove
-                </button>
-              </>
-            ) : (
-              <button
-                className="btn accent"
-                disabled={hookBusy}
-                onClick={runInstall}
-              >
-                {hookBusy ? "Installing…" : "Install hooks"}
-              </button>
-            )}
+          <div className="set-row">
+            <span className="set-label">Focus terminal automatically</span>
+            <Toggle
+              checked={settings.focus_terminal_on_waiting}
+              onChange={(v) => patch({ focus_terminal_on_waiting: v })}
+            />
           </div>
-          {hookErr && <div className="set-error">{hookErr}</div>}
+          <div className="set-help">
+            Bring the agent's terminal window to the front the moment it starts
+            waiting, without clicking.
+          </div>
         </Section>
 
         {/* General */}

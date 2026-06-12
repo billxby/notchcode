@@ -3,8 +3,23 @@
 export type Status = "idle" | "working" | "waiting" | "done";
 export type Role = "user" | "assistant";
 
+/** Which coding agent a session belongs to (mirrors the Rust `Agent`). */
+export type Agent = "claude" | "codex";
+
+export const AGENT_LABELS: Record<Agent, string> = {
+  claude: "Claude",
+  codex: "Codex",
+};
+
+/** Per-agent accent. Claude keeps its orange; Codex gets OpenAI's teal-green. */
+export const AGENT_ACCENT: Record<Agent, string> = {
+  claude: "#ff9d3d",
+  codex: "#10a37f",
+};
+
 export type SessionInfo = {
   id: string;
+  agent: Agent;
   project: string;
   status: Status;
   detail: string | null;
@@ -31,6 +46,8 @@ export type SessionDetail = SessionInfo & {
 
 export type NotchState = {
   status: Status;
+  /** Agent driving a working aggregate, so the collapsed pill tints by agent. */
+  agent: Agent | null;
   detail: string | null;
   sessions: SessionInfo[];
   weekly_tokens: number;
@@ -51,6 +68,10 @@ export type AppSettings = {
   brake_threshold_percent: number;
   daily_cap_usd: number;
   working_animation: WorkingAnimation;
+  /** Toast when a session blocks on the user (permission / request_user_input). */
+  notify_on_waiting: boolean;
+  /** Auto-raise the agent's terminal the moment it starts waiting. */
+  focus_terminal_on_waiting: boolean;
 };
 
 export const PLAN_LABELS: Record<PlanTier, string> = {

@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
-# install-hooks.sh — register Notchcode hook entries in ~/.claude/settings.json
+# install-hooks.sh — register Notchcode hook entries for a coding agent.
+#
+# Usage: install-hooks.sh [claude|codex]   (defaults to claude)
+#
+#   claude → ~/.claude/settings.json   (hooks under the "hooks" key)
+#   codex  → ~/.codex/hooks.json       (same {hooks:{Event:[…]}} shape)
 #
 # Additive : existing hooks from other tools are preserved.
-# Idempotent: safe to re-run; old Notchcode entries are removed first.
-# Identifier: every entry contains "127.0.0.1:9876". That marker is how
-#             this script (and the uninstaller) tells our entries apart
-#             from anything else the user has wired up.
+# Idempotent: safe to re-run; old Notchcode entries (this agent's) are removed first.
+# Identifier: every entry contains "127.0.0.1:9876". That marker is how this
+#             script (and the uninstaller) tells our entries apart. The two
+#             agents write to two different files, so installing one never
+#             touches the other.
 #
-# Wire shape is fire-and-forget on a 1s timeout — Notchcode being down
-# never blocks Claude Code. The blocking-permission route is left to a
-# future opt-in toggle.
+# Wire shape is fire-and-forget on a 1s timeout — Notchcode being down never
+# blocks the agent.
 
 set -euo pipefail
 
-SETTINGS="${HOME}/.claude/settings.json"
+AGENT="${1:-claude}"
+case "$AGENT" in
+    claude) SETTINGS="${HOME}/.claude/settings.json"; MATCHER="*"  ;;
+    codex)  SETTINGS="${HOME}/.codex/hooks.json";     MATCHER=".*" ;;  # Codex matchers are regexes
+    *) echo "ERROR: unknown agent '$AGENT' (expected claude|codex)" >&2; exit 2 ;;
+esac
+
 PORT="9876"
 MARKER="127.0.0.1:${PORT}"
+SEGMENT="$AGENT"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP="${SETTINGS}.notchcode-backup-${STAMP}"
 
@@ -24,11 +36,11 @@ mkdir -p "$(dirname "$SETTINGS")"
 
 cp "$SETTINGS" "$BACKUP"
 
-python3 - "$SETTINGS" "$MARKER" "$PORT" <<'PYEOF'
+python3 - "$SETTINGS" "$MARKER" "$SEGMENT" "$MATCHER" <<'PYEOF'
 import json
 import sys
 
-settings_path, marker, port = sys.argv[1], sys.argv[2], sys.argv[3]
+settings_path, marker, segment, matcher = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(settings_path, "r") as f:
     try:
@@ -55,23 +67,23 @@ for event_name, groups in list(hooks.items()):
             del hooks[event_name]
 
 def cmd(kind):
-    # $PPID is the parent of the shell running this curl — i.e., the
-    # `claude` process itself. Forwarding it as a custom header lets
-    # Notchcode track a per-session PID, enabling per-session SIGTERM
-    # ("End session" button) and per-session death detection instead of
-    # the global pgrep-all check, which goes 0 or 1 for the whole app.
+    # $PPID is the parent of the shell running this curl — i.e., the agent
+    # process itself. Forwarding it as X-Notch-PID lets Notchcode track a
+    # per-session PID, enabling per-session SIGTERM ("End session") and
+    # per-session death detection instead of the global pgrep-all check.
+    # The /<segment>/hook/ prefix tells the server which agent fired.
     return (
         "curl -s --max-time 1 --connect-timeout 1 "
-        f"-H \"X-Claude-PID: $PPID\" "
+        f"-H \"X-Notch-PID: $PPID\" "
         "-X POST --data-binary @- "
-        f"http://{marker}/hook/{kind} 2>/dev/null || true"
+        f"http://{marker}/{segment}/hook/{kind} 2>/dev/null || true"
     )
 
 events = ["PreToolUse", "PostToolUse", "UserPromptSubmit", "PermissionRequest", "Stop"]
 
 for event in events:
     group = {
-        "matcher": "*",
+        "matcher": matcher,
         "hooks": [{"type": "command", "command": cmd(event)}],
     }
     hooks.setdefault(event, []).append(group)
@@ -84,4 +96,4 @@ print("Notchcode hooks installed: " + ", ".join(events))
 PYEOF
 
 echo "Backup written to: ${BACKUP}"
-echo "Notchcode is now wired into ~/.claude/settings.json on port ${PORT}."
+echo "Notchcode is now wired into ${SETTINGS} on port ${PORT} (agent: ${AGENT})."

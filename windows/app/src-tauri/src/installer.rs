@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use crate::agent::Agent;
 use crate::hooks::HOOK_PORT;
 
 /// Current-format marker — the distinctive subcommand every hook we install
@@ -41,32 +42,31 @@ const EVENTS: [&str; 5] = [
     "Stop",
 ];
 
-/// `%USERPROFILE%\.claude\settings.json`.
-fn settings_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")?;
-    Some(PathBuf::from(home).join(".claude").join("settings.json"))
+/// The agent's hook config file: `%USERPROFILE%\.claude\settings.json` or
+/// `%USERPROFILE%\.codex\hooks.json`.
+fn config_path(agent: Agent) -> Option<PathBuf> {
+    agent.hook_config_file()
 }
 
-/// The hook command for one event: our own exe in forwarder mode. Unlike the
-/// Mac bash one-liner, this carries no shell metacharacters (`$PPID`,
-/// `2>/dev/null`, `|| true`) — a bare quoted exe path + args runs identically
-/// under cmd.exe and Git Bash, the two shells Claude Code routes hooks through
-/// on Windows. The forwarder reads stdin, resolves the Claude PID natively, and
+/// The hook command for one event: our own exe in forwarder mode, tagged with
+/// the agent so the forwarder POSTs to `/<agent>/hook/<Event>`. Carries no shell
+/// metacharacters — a bare quoted exe path + args runs identically under cmd.exe
+/// and Git Bash. The forwarder reads stdin, resolves the agent PID natively, and
 /// POSTs to the loopback server with a 1s budget (see `hooks::forward`).
 ///
 /// The path is emitted with forward slashes: `CreateProcess` accepts them on
 /// Windows, and they avoid the backslash-as-escape mangling that breaks a
-/// `C:\...` path when Claude Code runs the hook through Git Bash.
-fn hook_command(exe: &str, event: &str) -> String {
+/// `C:\...` path when the agent runs the hook through Git Bash.
+fn hook_command(exe: &str, agent: Agent, event: &str) -> String {
     let exe = exe.replace('\\', "/");
-    format!("\"{exe}\" {HOOK_MARKER} {event}")
+    format!("\"{exe}\" {HOOK_MARKER} {} {event}", agent.segment())
 }
 
 /// True if settings.json already carries our *current-format* hooks. Legacy
 /// (bash one-liner) entries deliberately read as "not installed" so startup's
 /// `ensure_installed` upgrades them to the forwarder form.
-pub fn is_installed() -> bool {
-    let Some(path) = settings_path() else {
+pub fn is_installed(agent: Agent) -> bool {
+    let Some(path) = config_path(agent) else {
         return false;
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -123,8 +123,8 @@ fn group_list_has_current(groups: &Value) -> bool {
 /// Merge our hook entries into settings.json: back up, strip any prior entries
 /// of ours, append fresh ones for each event. Additive and idempotent.
 /// Returns a short human status string on success, or an error message.
-pub fn install() -> Result<String, String> {
-    let path = settings_path().ok_or("USERPROFILE not set")?;
+pub fn install(agent: Agent) -> Result<String, String> {
+    let path = config_path(agent).ok_or("USERPROFILE not set")?;
 
     // The hook command invokes this very binary in forwarder mode, so resolve
     // its absolute path now and bake it into each entry.
@@ -181,11 +181,12 @@ pub fn install() -> Result<String, String> {
     }
     hooks.retain(|_, groups| !groups.as_array().map(|l| l.is_empty()).unwrap_or(false));
 
-    // Append a fresh group per event.
+    // Append a fresh group per event. Matcher is agent-specific (Claude "*",
+    // Codex regex ".*").
     for event in EVENTS {
         let group = json!({
-            "matcher": "*",
-            "hooks": [{ "type": "command", "command": hook_command(&exe, event) }],
+            "matcher": agent.matcher(),
+            "hooks": [{ "type": "command", "command": hook_command(&exe, agent, event) }],
         });
         hooks
             .entry(event.to_string())
@@ -202,7 +203,8 @@ pub fn install() -> Result<String, String> {
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
     Ok(format!(
-        "Notchcode hooks installed on port {HOOK_PORT}: {}",
+        "Notchcode {} hooks installed on port {HOOK_PORT}: {}",
+        agent.display_name(),
         EVENTS.join(", ")
     ))
 }
@@ -211,14 +213,14 @@ pub fn install() -> Result<String, String> {
 /// intact. Backs up first, strips groups carrying our marker, drops events left
 /// empty, and removes an empty top-level `hooks` object. Idempotent: a no-op
 /// (still `Ok`) when nothing of ours is present.
-pub fn uninstall() -> Result<String, String> {
-    let path = settings_path().ok_or("USERPROFILE not set")?;
+pub fn uninstall(agent: Agent) -> Result<String, String> {
+    let path = config_path(agent).ok_or("USERPROFILE not set")?;
 
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok("No settings.json — nothing to remove.".into());
+        return Ok("No config file — nothing to remove.".into());
     };
     if text.trim().is_empty() {
-        return Ok("settings.json is empty — nothing to remove.".into());
+        return Ok("Config file is empty — nothing to remove.".into());
     }
     let mut cfg: Value = serde_json::from_str(&text).map_err(|e| {
         format!(
@@ -254,19 +256,24 @@ pub fn uninstall() -> Result<String, String> {
     std::fs::write(&path, serialized + "\n")
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
-    Ok("Notchcode hooks removed from settings.json.".into())
+    Ok(format!(
+        "Notchcode {} hooks removed.",
+        agent.display_name()
+    ))
 }
 
 /// Install hooks if they aren't already present. Run at startup so the overlay
 /// can receive precise states without the user hunting for a button (there's no
 /// settings UI until w0.6). Idempotent and backed up, so a no-op when already
 /// wired. Logs the outcome; never panics the app over a settings.json problem.
+/// Auto-install only Claude Code's hooks at startup (the primary agent). Codex
+/// is opt-in from Settings — we don't write to a user's ~/.codex unprompted.
 pub fn ensure_installed() {
-    if is_installed() {
-        eprintln!("[notchcode] hooks already present in settings.json");
+    if is_installed(Agent::Claude) {
+        eprintln!("[notchcode] Claude hooks already present in settings.json");
         return;
     }
-    match install() {
+    match install(Agent::Claude) {
         Ok(msg) => eprintln!("[notchcode] {msg}"),
         Err(e) => eprintln!("[notchcode] hook install skipped: {e}"),
     }

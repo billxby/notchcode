@@ -17,7 +17,7 @@
 import Foundation
 
 // `nonisolated` because the project defaults to @MainActor; this is pure math
-// and needs to be callable from JSONLParser (its own actor) without hopping.
+// and needs to be callable from ClaudeJSONLParser (its own actor) without hopping.
 nonisolated enum CostTracker {
 
     // MARK: - Usage payload
@@ -46,16 +46,36 @@ nonisolated enum CostTracker {
         case opus4
         case sonnet4
         case haiku4
+        // OpenAI / Codex models. Codex reports usage with a different token
+        // breakdown (input / cached_input / output / reasoning_output); we map
+        // cached_input onto the cacheRead lane and fold reasoning into output,
+        // so the same `cost(for:model:)` math applies. See Agent/Codex parser.
+        // The buckets are split by price tier (the Codex CLI default model has
+        // changed over releases — gpt-5-codex → gpt-5.x-codex → gpt-5.5).
+        case gpt5Codex      // gpt-5-codex (original)
+        case gpt5xCodex     // gpt-5.2/5.3/5.4-codex (specialized tier)
+        case gpt55          // gpt-5.5 (flagship tier, incl. gpt-5.5 in Codex)
+        case gpt5           // gpt-5 (base)
         case unknown
 
-        /// Map a wire-format model string (e.g. "claude-opus-4-7",
-        /// "claude-sonnet-4-6", "claude-haiku-4-5-20251001") into our bucket.
-        /// Matches by substring on the family name; tolerant to suffix drift.
+        /// Map a wire-format model string into our bucket. Matches by substring
+        /// on the family name; tolerant to suffix drift. Claude families are
+        /// checked first; OpenAI/Codex slugs fall through to the OpenAI buckets.
         static func from(_ raw: String?) -> Model {
             guard let raw = raw?.lowercased() else { return .unknown }
             if raw.contains("opus")   { return .opus4 }
             if raw.contains("sonnet") { return .sonnet4 }
             if raw.contains("haiku")  { return .haiku4 }
+            // gpt-5.5 is a distinct (higher) price tier — check it before the
+            // generic codex/gpt-5 buckets so "gpt-5.5-codex" isn't underpriced.
+            if raw.contains("5.5")    { return .gpt55 }
+            if raw.contains("codex") {
+                if raw.contains("5.2") || raw.contains("5.3") || raw.contains("5.4") {
+                    return .gpt5xCodex
+                }
+                return .gpt5Codex
+            }
+            if raw.contains("gpt-5") || raw.contains("gpt5") { return .gpt5 }
             return .unknown
         }
     }
@@ -97,6 +117,40 @@ nonisolated enum CostTracker {
             cacheWrite5m:  1.25,
             cacheWrite1h:  2.00,
             cacheRead:     0.10
+        ),
+        // Verified 2026-06-11 against OpenAI's pricing page
+        // (developers.openai.com/api/docs/pricing) + pricepertoken.com. OpenAI
+        // bills only input / cached-input / output (no separate cache-WRITE
+        // tier), so cacheWrite lanes are 0 and `cacheRead` carries the
+        // cached-input rate (≈10% of input). Reasoning tokens bill at the
+        // output rate and are folded into outputTokens by the Codex parser.
+        .gpt5Codex: Pricing(      // gpt-5-codex
+            input:         1.25,
+            output:       10.00,
+            cacheWrite5m:  0.00,
+            cacheWrite1h:  0.00,
+            cacheRead:     0.125
+        ),
+        .gpt5xCodex: Pricing(     // gpt-5.2 / 5.3 / 5.4-codex
+            input:         1.75,
+            output:       14.00,
+            cacheWrite5m:  0.00,
+            cacheWrite1h:  0.00,
+            cacheRead:     0.175
+        ),
+        .gpt55: Pricing(          // gpt-5.5 (flagship)
+            input:         5.00,
+            output:       30.00,
+            cacheWrite5m:  0.00,
+            cacheWrite1h:  0.00,
+            cacheRead:     0.50
+        ),
+        .gpt5: Pricing(           // gpt-5 (base)
+            input:         1.25,
+            output:       10.00,
+            cacheWrite5m:  0.00,
+            cacheWrite1h:  0.00,
+            cacheRead:     0.125
         ),
     ]
 

@@ -102,7 +102,7 @@ mod imp {
     ///
     /// Falls back to the first non-shell ancestor, then to the immediate parent,
     /// so we always forward *something* usable for per-session liveness.
-    pub fn resolve_session_pid() -> Option<u32> {
+    pub fn resolve_session_pid(process_name: &str) -> Option<u32> {
         let procs = process_snapshot();
 
         let parent_of = |pid: u32| -> Option<(u32, String)> {
@@ -141,8 +141,9 @@ mod imp {
             if hop == 0 {
                 immediate_parent = Some(pid);
             }
-            // Claude Code ships as `claude.exe` (native) or runs under `node.exe` (npm).
-            if name.contains("claude") || name == "node.exe" {
+            // The agent ships as `<name>.exe` (native, e.g. claude.exe /
+            // codex.exe) or runs under `node.exe` (npm). Match either.
+            if name.contains(process_name) || name == "node.exe" {
                 return Some(pid);
             }
             if first_non_shell.is_none() && !SHELLS.contains(&name.as_str()) {
@@ -326,7 +327,7 @@ mod imp {
         true
     }
     pub fn terminate(_pid: u32) {}
-    pub fn resolve_session_pid() -> Option<u32> {
+    pub fn resolve_session_pid(_process_name: &str) -> Option<u32> {
         None
     }
     pub fn session_window(_claude_pid: u32, _project: &str, _captured: Option<isize>) -> Option<isize> {

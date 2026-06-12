@@ -1,4 +1,6 @@
-// Incremental parser for ~/.claude/projects/<slug>/<session-id>.jsonl.
+// Incremental parser for Claude Code's ~/.claude/projects/<slug>/<id>.jsonl.
+// The Claude counterpart to CodexRolloutParser; both emit the agent-neutral
+// events in TranscriptEvents.swift.
 //
 // Each line in the JSONL is one event (user message, assistant message, tool
 // result, etc.). We only care about `type == "assistant"` lines, which carry
@@ -18,8 +20,8 @@
 
 import Foundation
 
-actor JSONLParser {
-    static let shared = JSONLParser()
+actor ClaudeJSONLParser {
+    static let shared = ClaudeJSONLParser()
     private init() {}
 
     /// Per-file resume cursors. Path → byte offset of next-byte-to-read.
@@ -27,32 +29,8 @@ actor JSONLParser {
     /// fine because Claude Code rotates session files frequently).
     private var lastReadOffset: [URL: UInt64] = [:]
 
-    /// A single cost-bearing event extracted from a JSONL line.
-    struct CostEvent: Equatable {
-        let sessionId: String
-        let project: String
-        let model: CostTracker.Model
-        let usage: CostTracker.Usage
-        let timestamp: Date
-    }
-
-    /// A single user or assistant message extracted from a JSONL line.
-    /// Text-only — tool_use / tool_result / image blocks are dropped (the
-    /// drill-down view is a reading surface, not a tool log).
-    struct MessageEvent: Equatable {
-        enum Role: String, Equatable { case user, assistant }
-        let sessionId: String
-        let project: String
-        let role: Role
-        let text: String
-        let timestamp: Date
-    }
-
-    /// Both event streams produced by a single pass over the new bytes.
-    struct ParseResult {
-        var costs: [CostEvent] = []
-        var messages: [MessageEvent] = []
-    }
+    // CostEvent / MessageEvent / ParseResult are agent-neutral and live in
+    // TranscriptEvents.swift, shared with CodexRolloutParser.
 
     /// Read every new line in `url` since the last call. Returns the events
     /// found AND the updated offset is committed internally — callers don't
@@ -116,7 +94,7 @@ actor JSONLParser {
         return result
     }
 
-    /// Reset cursor for a file — used when ProjectsWatcher sees the file
+    /// Reset cursor for a file — used when ClaudeProjectsWatcher sees the file
     /// disappear/rotate, or on app launch if we want a full rescan.
     func resetCursor(for url: URL) {
         lastReadOffset[url] = 0

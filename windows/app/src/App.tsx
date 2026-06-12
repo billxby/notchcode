@@ -16,6 +16,8 @@ import {
   formatRuntime,
   usageFraction,
   usesDollarBudget,
+  AGENT_ACCENT,
+  AGENT_LABELS,
   type AppSettings,
   type NotchState,
   type SessionDetail,
@@ -43,6 +45,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   brake_threshold_percent: 0.85,
   daily_cap_usd: 25,
   working_animation: "mascot",
+  notify_on_waiting: true,
+  focus_terminal_on_waiting: true,
 };
 
 type DragState = {
@@ -190,6 +194,7 @@ function PanelView({
         <StatusIndicator
           status={state.status}
           anim={settings.working_animation}
+          agent={state.agent ?? undefined}
           forceColor={braked ? "#ff9d3d" : undefined}
         />
         <span className="header-title">{headerLabel}</span>
@@ -254,10 +259,20 @@ function PanelView({
                   <StatusIndicator
                     status="working"
                     anim={settings.working_animation}
+                    agent={s.agent}
                   />
                 ) : (
                   <StatusDot status={s.status} />
                 )}
+                <span
+                  className="agent-badge"
+                  style={{
+                    color: AGENT_ACCENT[s.agent],
+                    backgroundColor: `${AGENT_ACCENT[s.agent]}29`,
+                  }}
+                >
+                  {AGENT_LABELS[s.agent].toUpperCase()}
+                </span>
                 <span className="session-project">{s.project || "—"}</span>
                 <span className="session-meta">
                   {s.detail ? s.detail : s.status}
@@ -397,7 +412,7 @@ function DetailView({
             detail.messages.map((m, i) => (
               <div key={i} className={`msg msg-${m.role}`}>
                 <span className="msg-role">
-                  {m.role === "user" ? "You" : "Claude"}
+                  {m.role === "user" ? "You" : AGENT_LABELS[detail.agent]}
                 </span>
                 <span className="msg-text">{m.text}</span>
               </div>
@@ -414,6 +429,7 @@ function DetailView({
 function App() {
   const [state, setState] = useState<NotchState>({
     status: "idle",
+    agent: null,
     detail: null,
     sessions: [],
     weekly_tokens: 0,
@@ -446,7 +462,7 @@ function App() {
     });
     invoke<boolean>("overlay_docked").then(updateDocked);
     invoke<AppSettings>("get_settings").then(setSettings);
-    invoke<boolean>("hooks_installed").then(setHooksInstalled);
+    invoke<boolean>("hooks_installed", { agent: "claude" }).then(setHooksInstalled);
     return () => {
       unlisten.then((off) => off());
       unlistenTray.then((off) => off());
@@ -630,6 +646,7 @@ function App() {
       <StatusIndicator
         status={state.status}
         anim={settings.working_animation}
+        agent={state.agent ?? undefined}
         forceColor={brakeEngaged ? "#ff9d3d" : undefined}
       />
       {state.status === "working" && state.detail && (

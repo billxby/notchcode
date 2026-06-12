@@ -133,6 +133,24 @@ final class AppSettings {
         didSet { defaults.set(workingAnimation.rawValue, forKey: Self.kWorkingAnimation) }
     }
 
+    // MARK: - Notifications
+
+    /// Post a macOS notification banner when a session blocks on the user
+    /// (a permission/approval request). The notch already turns yellow, but a
+    /// banner reaches you when you've switched to another app — the whole
+    /// point, since the agent is stalled until you answer. Codex in particular
+    /// asks for approval often, so this defaults on.
+    var notifyOnWaiting: Bool {
+        didSet { defaults.set(notifyOnWaiting, forKey: Self.kNotifyOnWaiting) }
+    }
+
+    /// Also bring the agent's terminal window to the front the moment it starts
+    /// waiting, without you having to click the banner or the notch. Defaults
+    /// on; turn off if you'd rather not have focus pulled mid-task.
+    var focusTerminalOnWaiting: Bool {
+        didSet { defaults.set(focusTerminalOnWaiting, forKey: Self.kFocusOnWaiting) }
+    }
+
     // MARK: - Keys
 
     private static let kPlanTier         = "notchcode.planTier"
@@ -141,6 +159,8 @@ final class AppSettings {
     private static let kDailyCap         = "notchcode.dailyCapUSD"
     private static let kWeeklyBudget     = "notchcode.weeklyTokenBudget"
     private static let kWorkingAnimation = "notchcode.workingAnimation"
+    private static let kNotifyOnWaiting   = "notchcode.notifyOnWaiting"
+    private static let kFocusOnWaiting    = "notchcode.focusTerminalOnWaiting"
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -157,5 +177,7 @@ final class AppSettings {
         self.dailyCapUSD = (defaults.object(forKey: Self.kDailyCap) as? Double) ?? 25
         let rawAnim = defaults.string(forKey: Self.kWorkingAnimation) ?? WorkingAnimation.mascot.rawValue
         self.workingAnimation = WorkingAnimation(rawValue: rawAnim) ?? .mascot
+        self.notifyOnWaiting = (defaults.object(forKey: Self.kNotifyOnWaiting) as? Bool) ?? true
+        self.focusTerminalOnWaiting = (defaults.object(forKey: Self.kFocusOnWaiting) as? Bool) ?? true
     }
 }

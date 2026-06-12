@@ -502,6 +502,17 @@ body,
   flex: none;
 }
 
+/* Per-agent identifier chip on a session row (color set inline per agent). */
+.agent-badge {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  flex: none;
+  line-height: 1;
+}
+
 .session-meta {
   font-size: 11px;
   color: var(--text-3);
