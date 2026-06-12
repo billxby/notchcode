@@ -74,7 +74,7 @@ impl Default for AppSettings {
             usage_tracking_enabled: true,
             brake_threshold_percent: 0.85,
             daily_cap_usd: 25.0,
-            working_animation: WorkingAnimation::Spinner,
+            working_animation: WorkingAnimation::Mascot,
         }
     }
 }

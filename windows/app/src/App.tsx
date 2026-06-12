@@ -42,7 +42,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   usage_tracking_enabled: true,
   brake_threshold_percent: 0.85,
   daily_cap_usd: 25,
-  working_animation: "spinner",
+  working_animation: "mascot",
 };
 
 type DragState = {
