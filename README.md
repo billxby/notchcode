@@ -13,6 +13,8 @@
   </a>
 </p>
 
+https://github.com/user-attachments/assets/004bf888-17de-4540-927e-38600448f776
+
 > **🟢 Actively maintained**
 >
 > v1.0.0 launched June 2026 with both macOS and Windows builds; v1.1.0 added Codex CLI support. Issues and PRs are reviewed.
