@@ -25,6 +25,9 @@ impl Default for Agent {
 }
 
 impl Agent {
+    /// Every agent, for fan-out loops (per-agent usage totals, etc.).
+    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Codex];
+
     /// URL path segment / config key: "claude" | "codex".
     pub fn segment(self) -> &'static str {
         match self {

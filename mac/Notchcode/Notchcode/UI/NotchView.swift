@@ -219,19 +219,15 @@ struct NotchView: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.92))
             Spacer()
-            if settings.usageTrackingEnabled && (engine.weeklyTokens > 0 || engine.dollarsToday > 0) {
+            if !visibleUsageAgents.isEmpty {
+                // ONE chip carrying a segment per visible agent — "CC 8.2M ·
+                // CD 4M". Each segment is metered against its own plan/budget
+                // and colored by its own level; which agents appear is set by
+                // the per-agent toggles in Settings.
                 Button {
                     overlay.showSettings()
                 } label: {
-                    UsageBadge(
-                        tier: settings.planTier,
-                        weeklyTokens: engine.weeklyTokens,
-                        todayTokens: engine.todayTokens,
-                        weeklyUSD: engine.weeklyDollars,
-                        usdToday: engine.dollarsToday,
-                        fraction: engine.usageFraction,
-                        braked: engine.brakeEngaged
-                    )
+                    UsageBadge(segments: visibleUsageAgents.map(makeUsageSegment))
                 }
                 .buttonStyle(.plain)
             }
@@ -255,10 +251,36 @@ struct NotchView: View {
         .padding(.bottom, 10)
     }
 
+    /// Agents whose usage chip segment should show: master toggle on, the
+    /// agent's own visibility toggle on, and it actually has usage to report.
+    private var visibleUsageAgents: [Agent] {
+        guard settings.usageTrackingEnabled else { return [] }
+        return engine.agentsWithUsage.filter { settings.showUsage(for: $0) }
+    }
+
+    /// Build one chip segment for an agent from the live engine + settings.
+    private func makeUsageSegment(_ agent: Agent) -> UsageBadge.Segment {
+        UsageBadge.Segment(
+            agent: agent,
+            tier: settings.planTier(for: agent),
+            weeklyTokens: engine.weeklyTokens(for: agent),
+            todayTokens: engine.todayTokens(for: agent),
+            weeklyUSD: engine.weeklyDollars(for: agent),
+            usdToday: engine.dollarsToday(for: agent),
+            weeklyBudget: settings.weeklyTokenBudget(for: agent),
+            fraction: engine.usageFraction(for: agent),
+            braked: engine.brakeEngaged(for: agent)
+        )
+    }
+
     @ViewBuilder
     private var body_: some View {
-        if settings.usageTrackingEnabled && engine.brakeEngaged {
-            brakeBanner
+        if settings.usageTrackingEnabled {
+            // One banner per agent that's over its threshold — a heavy Codex
+            // week shouldn't be hidden behind Claude's bar, or vice versa.
+            ForEach(Agent.allCases.filter { engine.brakeEngaged(for: $0) }, id: \.self) { agent in
+                brakeBanner(agent)
+            }
         }
 
         if engine.activeSessions.isEmpty {
@@ -292,14 +314,14 @@ struct NotchView: View {
     /// list, just an orange dot for color — rather than a callout card. The
     /// one-time auto-expand already grabbed the user's attention; the strip
     /// only needs to persist the fact.
-    private var brakeBanner: some View {
+    private func brakeBanner(_ agent: Agent) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text(brakeTitle)
+                Text(brakeTitle(agent))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
                 Spacer()
-                Text(brakeSubtitle)
+                Text(brakeSubtitle(agent))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
                 Button {
@@ -317,7 +339,7 @@ struct NotchView: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 9)
-            .help(settings.planTier.usesDollarBudget
+            .help(settings.planTier(for: agent).usesDollarBudget
                   ? "Measured against your daily $ cap from Settings."
                   : "Budget is your own gauge — adjust it in Settings.")
 
@@ -325,19 +347,19 @@ struct NotchView: View {
         }
     }
 
-    private var brakeTitle: String {
-        if settings.planTier.usesDollarBudget {
-            return "Approaching daily API budget"
+    private func brakeTitle(_ agent: Agent) -> String {
+        if settings.planTier(for: agent).usesDollarBudget {
+            return "\(agent.displayName): approaching daily API budget"
         }
-        return "Approaching weekly budget"
+        return "\(agent.displayName): approaching weekly budget"
     }
 
-    private var brakeSubtitle: String {
-        let pct = Int((engine.usageFraction * 100).rounded())
-        if settings.planTier.usesDollarBudget {
-            return String(format: "≈$%.2f today · %d%%", engine.dollarsToday, pct)
+    private func brakeSubtitle(_ agent: Agent) -> String {
+        let pct = Int((engine.usageFraction(for: agent) * 100).rounded())
+        if settings.planTier(for: agent).usesDollarBudget {
+            return String(format: "≈$%.2f today · %d%%", engine.dollarsToday(for: agent), pct)
         }
-        return "\(compactTokenCount(engine.weeklyTokens)) of \(compactTokenCount(settings.weeklyTokenBudget)) · \(pct)%"
+        return "\(compactTokenCount(engine.weeklyTokens(for: agent))) of \(compactTokenCount(settings.weeklyTokenBudget(for: agent))) · \(pct)%"
     }
 
     // MARK: - Empty-state branches
@@ -615,52 +637,88 @@ func compactTokenCount(_ n: Int) -> String {
 ///     e.g. "8.2M wk". No reset countdown — Anthropic's window anchors
 ///     can't be known locally, so we don't pretend to know them.
 private struct UsageBadge: View {
-    let tier: AppSettings.PlanTier
-    let weeklyTokens: Int
-    let todayTokens: Int
-    let weeklyUSD: Double
-    let usdToday: Double
-    let fraction: Double
-    let braked: Bool
+    /// One agent's slice of the combined chip — its own numbers, level, and
+    /// hover text. Rendered as "CC 8.2M", joined by a thin "·" separator.
+    struct Segment: Identifiable {
+        let agent: Agent
+        let tier: AppSettings.PlanTier
+        let weeklyTokens: Int
+        let todayTokens: Int
+        let weeklyUSD: Double
+        let usdToday: Double
+        let weeklyBudget: Int
+        let fraction: Double
+        let braked: Bool
+
+        var id: String { agent.rawValue }
+
+        /// Compact "CC 8.2M" / "CD $4". No "wk" suffix — the chip stays short
+        /// with two agents; the hover text spells out the window.
+        var text: String {
+            let prefix = agent.shortName
+            if tier.usesDollarBudget {
+                let amount = usdToday < 10 ? String(format: "$%.2f", usdToday) : String(format: "$%.0f", usdToday)
+                return "\(prefix) \(amount)"
+            }
+            return "\(prefix) \(compactTokenCount(weeklyTokens))"
+        }
+
+        /// 0 normal · 1 warn (≥60%) · 2 braked. Drives this segment's text color.
+        var level: Int { braked ? 2 : (fraction >= 0.6 ? 1 : 0) }
+
+        var help: String {
+            let who = agent.displayName
+            if tier.usesDollarBudget {
+                return String(format: "%@: ≈$%.2f spent today at API rates (%d%% of your daily cap).",
+                              who, usdToday, Int((fraction * 100).rounded()))
+            }
+            let pct = Int((fraction * 100).rounded())
+            return "\(who): \(compactTokenCount(weeklyTokens)) tokens in the last 7 days on this Mac"
+                 + " · \(compactTokenCount(todayTokens)) today"
+                 + String(format: " · ≈$%.0f at API rates.", weeklyUSD)
+                 + " \(pct)% of your \(compactTokenCount(weeklyBudget)) weekly budget."
+        }
+    }
+
+    let segments: [Segment]
 
     var body: some View {
-        Text(primaryLabel)
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(textColor)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(bgColor))
-            .help(helpText)
+        HStack(spacing: 5) {
+            ForEach(Array(segments.enumerated()), id: \.element.id) { idx, seg in
+                if idx > 0 {
+                    Text("·")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.3))
+                }
+                Text(seg.text)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(color(for: seg.level))
+                    .help(seg.help)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(bgColor))
     }
 
-    private var primaryLabel: String {
-        if tier.usesDollarBudget {
-            return usdToday < 10 ? String(format: "$%.2f", usdToday) : String(format: "$%.0f", usdToday)
-        }
-        return "\(compactTokenCount(weeklyTokens)) wk"
-    }
-
-    private var helpText: String {
-        if tier.usesDollarBudget {
-            return String(format: "≈$%.2f spent today at API rates (%d%% of your daily cap).",
-                          usdToday, Int((fraction * 100).rounded()))
-        }
-        let pct = Int((fraction * 100).rounded())
-        return "\(compactTokenCount(weeklyTokens)) tokens in the last 7 days on this Mac"
-             + " · \(compactTokenCount(todayTokens)) today"
-             + String(format: " · ≈$%.0f at API rates.", weeklyUSD)
-             + " \(pct)% of your \(compactTokenCount(AppSettings.shared.weeklyTokenBudget)) weekly budget."
-    }
+    /// Chip background reflects the hottest segment so a braked agent still
+    /// tints the whole pill even next to a quiet one.
+    private var maxLevel: Int { segments.map(\.level).max() ?? 0 }
 
     private var bgColor: Color {
-        if braked          { return .orange.opacity(0.25) }
-        if fraction >= 0.6 { return .yellow.opacity(0.20) }
-        return .white.opacity(0.08)
+        switch maxLevel {
+        case 2:  return .orange.opacity(0.25)
+        case 1:  return .yellow.opacity(0.20)
+        default: return .white.opacity(0.08)
+        }
     }
-    private var textColor: Color {
-        if braked          { return .orange }
-        if fraction >= 0.6 { return .yellow }
-        return .white.opacity(0.75)
+
+    private func color(for level: Int) -> Color {
+        switch level {
+        case 2:  return .orange
+        case 1:  return .yellow
+        default: return .white.opacity(0.75)
+        }
     }
 }
 
@@ -758,7 +816,8 @@ private struct SessionRow: View {
                 // token — for Pro/Max subscribers, API-rate dollars are noise
                 // and routinely look alarmingly high without being actionable.
                 if AppSettings.shared.usageTrackingEnabled
-                    && AppSettings.shared.planTier.usesDollarBudget
+                    && AppSettings.shared.showUsage(for: session.agent)
+                    && AppSettings.shared.planTier(for: session.agent).usesDollarBudget
                     && session.costUSD > 0 {
                     Text(String(format: "$%.2f", session.costUSD))
                         .font(.system(size: 10, design: .monospaced))

@@ -17,8 +17,15 @@ import {
   formatRuntime,
   usageFraction,
   usesDollarBudget,
+  planTierFor,
+  weeklyBudgetFor,
+  showUsageFor,
+  agentUsage,
+  agentsWithUsage,
   AGENT_ACCENT,
   AGENT_SHORT,
+  AGENT_LABELS,
+  type Agent,
   type AppSettings,
   type NotchState,
   type SessionDetail,
@@ -47,9 +54,14 @@ type View = "pill" | "panel" | "settings" | "detail";
 const DEFAULT_SETTINGS: AppSettings = {
   plan_tier: "max5",
   weekly_token_budget: 50_000_000,
-  usage_tracking_enabled: true,
-  brake_threshold_percent: 0.85,
   daily_cap_usd: 25,
+  codex_plan_tier: "plus",
+  codex_weekly_token_budget: 10_000_000,
+  codex_daily_cap_usd: 25,
+  usage_tracking_enabled: true,
+  show_usage_claude: true,
+  show_usage_codex: true,
+  brake_threshold_percent: 0.85,
   working_animation: "mascot",
   notify_on_waiting: true,
   focus_terminal_on_waiting: true,
@@ -83,31 +95,55 @@ function clamp(v: number, lo: number, hi: number): number {
 function UsageBadge({
   state,
   settings,
-  braked,
+  agents,
+  brakedAgents,
   onClick,
 }: {
   state: NotchState;
   settings: AppSettings;
-  braked: boolean;
+  agents: Agent[];
+  brakedAgents: Agent[];
   onClick: () => void;
 }) {
-  const fraction = usageFraction(state, settings);
-  const dollar = usesDollarBudget(settings.plan_tier);
-  const label = dollar
-    ? state.dollars_today < 10
-      ? `$${state.dollars_today.toFixed(2)}`
-      : `$${state.dollars_today.toFixed(0)}`
-    : `${compactTokens(state.weekly_tokens)} wk`;
-  const level = braked ? "braked" : fraction >= 0.6 ? "warn" : "";
+  // One chip, a segment per visible agent ("CC 8.2M · CD 4M"). Each segment is
+  // colored by its own level; the chip background follows the hottest one.
+  const segments = agents.map((agent) => {
+    const fraction = usageFraction(state, settings, agent);
+    const u = agentUsage(state, agent);
+    const dollar = usesDollarBudget(planTierFor(settings, agent));
+    const amount = dollar
+      ? u.dollars_today < 10
+        ? `$${u.dollars_today.toFixed(2)}`
+        : `$${u.dollars_today.toFixed(0)}`
+      : compactTokens(u.weekly_tokens);
+    const level = brakedAgents.includes(agent) ? 2 : fraction >= 0.6 ? 1 : 0;
+    return { agent, text: `${AGENT_SHORT[agent]} ${amount}`, level };
+  });
+  const maxLevel = Math.max(0, ...segments.map((s) => s.level));
+  const chipLevel = maxLevel === 2 ? "braked" : maxLevel === 1 ? "warn" : "";
   return (
     <button
-      className={`usage-badge ${level}`}
+      className={`usage-badge ${chipLevel}`}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
     >
-      {label}
+      {segments.flatMap((s, i) => {
+        const seg = (
+          <span key={s.agent} className={`usage-seg lvl-${s.level}`}>
+            {s.text}
+          </span>
+        );
+        return i === 0
+          ? [seg]
+          : [
+              <span key={`sep-${s.agent}`} className="usage-sep">
+                ·
+              </span>,
+              seg,
+            ];
+      })}
     </button>
   );
 }
@@ -117,21 +153,25 @@ function UsageBadge({
 function BrakeBanner({
   state,
   settings,
+  agent,
   onDismiss,
 }: {
   state: NotchState;
   settings: AppSettings;
+  agent: Agent;
   onDismiss: () => void;
 }) {
-  const dollar = usesDollarBudget(settings.plan_tier);
-  const pct = Math.round(usageFraction(state, settings) * 100);
+  const dollar = usesDollarBudget(planTierFor(settings, agent));
+  const pct = Math.round(usageFraction(state, settings, agent) * 100);
+  const u = agentUsage(state, agent);
+  const who = AGENT_LABELS[agent];
   const title = dollar
-    ? "Approaching daily API budget"
-    : "Approaching weekly budget";
+    ? `${who}: approaching daily API budget`
+    : `${who}: approaching weekly budget`;
   const sub = dollar
-    ? `≈$${state.dollars_today.toFixed(2)} today · ${pct}%`
-    : `${compactTokens(state.weekly_tokens)} of ${compactTokens(
-        settings.weekly_token_budget
+    ? `≈$${u.dollars_today.toFixed(2)} today · ${pct}%`
+    : `${compactTokens(u.weekly_tokens)} of ${compactTokens(
+        weeklyBudgetFor(settings, agent)
       )} · ${pct}%`;
   return (
     <div className="brake-banner">
@@ -174,6 +214,7 @@ function PanelView({
   state,
   settings,
   braked,
+  brakedAgents,
   hooksInstalled,
   onSelect,
   onCollapse,
@@ -183,6 +224,7 @@ function PanelView({
   state: NotchState;
   settings: AppSettings;
   braked: boolean;
+  brakedAgents: Agent[];
   hooksInstalled: boolean;
   onSelect: (id: string) => void;
   onCollapse: () => void;
@@ -191,11 +233,9 @@ function PanelView({
 }) {
   const n = state.sessions.length;
   const headerLabel = n === 0 ? "Notchcode" : n === 1 ? "1 session" : `${n} sessions`;
-  const showUsage =
-    settings.usage_tracking_enabled &&
-    (state.weekly_tokens > 0 || state.dollars_today > 0);
-  const showCost =
-    settings.usage_tracking_enabled && usesDollarBudget(settings.plan_tier);
+  const usageAgents = settings.usage_tracking_enabled
+    ? agentsWithUsage(state).filter((a) => showUsageFor(settings, a))
+    : [];
 
   return (
     <div className="sheet-inner">
@@ -208,11 +248,13 @@ function PanelView({
         />
         <span className="header-title">{headerLabel}</span>
         <span className="spacer" />
-        {showUsage && (
+        {/* One combined chip: a segment per visible agent ("CC X · CD X"). */}
+        {usageAgents.length > 0 && (
           <UsageBadge
             state={state}
             settings={settings}
-            braked={braked}
+            agents={usageAgents}
+            brakedAgents={brakedAgents}
             onClick={onSettings}
           />
         )}
@@ -230,13 +272,17 @@ function PanelView({
       <div className="sheet-divider" />
 
       <div className="sheet-body">
-        {braked && settings.usage_tracking_enabled && (
-          <BrakeBanner
-            state={state}
-            settings={settings}
-            onDismiss={onDismissBrake}
-          />
-        )}
+        {/* One banner per agent over its threshold. */}
+        {settings.usage_tracking_enabled &&
+          brakedAgents.map((agent) => (
+            <BrakeBanner
+              key={agent}
+              state={state}
+              settings={settings}
+              agent={agent}
+              onDismiss={onDismissBrake}
+            />
+          ))}
 
         {state.sessions.length === 0 ? (
           hooksInstalled ? (
@@ -289,9 +335,12 @@ function PanelView({
                   </span>
                 </span>
                 <span className="spacer" />
-                {showCost && s.cost_usd > 0 && (
-                  <span className="session-cost">{formatCost(s.cost_usd)}</span>
-                )}
+                {settings.usage_tracking_enabled &&
+                  showUsageFor(settings, s.agent) &&
+                  usesDollarBudget(planTierFor(settings, s.agent)) &&
+                  s.cost_usd > 0 && (
+                    <span className="session-cost">{formatCost(s.cost_usd)}</span>
+                  )}
                 {s.ended ? (
                   <RowButton
                     glyph="✕"
@@ -443,10 +492,10 @@ function App() {
     agent: null,
     detail: null,
     sessions: [],
-    weekly_tokens: 0,
-    weekly_dollars: 0,
-    today_tokens: 0,
-    dollars_today: 0,
+    usage: {
+      claude: { weekly_tokens: 0, weekly_dollars: 0, today_tokens: 0, dollars_today: 0 },
+      codex: { weekly_tokens: 0, weekly_dollars: 0, today_tokens: 0, dollars_today: 0 },
+    },
   });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [view, setView] = useState<View>("pill");
@@ -534,11 +583,17 @@ function App() {
   // ---- Usage brake -------------------------------------------------------
 
   const today = new Date().toDateString();
-  const fraction = usageFraction(state, settings);
-  const brakeEngaged =
-    settings.usage_tracking_enabled &&
-    fraction >= settings.brake_threshold_percent &&
-    brakeDismissedDay !== today;
+  // Per-agent brake: an agent fires when its own usage crosses the shared
+  // threshold. One "dismiss for today" quiets both until the day rolls over.
+  const brakedAgents: Agent[] =
+    settings.usage_tracking_enabled && brakeDismissedDay !== today
+      ? (["claude", "codex"] as Agent[]).filter(
+          (a) =>
+            showUsageFor(settings, a) &&
+            usageFraction(state, settings, a) >= settings.brake_threshold_percent
+        )
+      : [];
+  const brakeEngaged = brakedAgents.length > 0;
 
   // First engage → auto-expand the panel once so it can't be missed.
   useEffect(() => {
@@ -794,6 +849,7 @@ function App() {
               state={state}
               settings={settings}
               braked={brakeEngaged}
+              brakedAgents={brakedAgents}
               hooksInstalled={hooksInstalled}
               onSelect={(id) => {
                 setSelectedId(id);

@@ -121,9 +121,12 @@ final class SessionStateEngine {
     // 7 days (primary) and the current calendar day. The brake compares the
     // weekly total against a USER-SET budget, not a guessed plan limit.
 
-    /// One observed assistant-message worth of usage, timestamped.
+    /// One observed assistant-message worth of usage, timestamped. Carries the
+    /// `agent` so weekly/today totals can be metered per agent — Claude and
+    /// Codex bill on separate plans with separate budgets.
     struct UsageEvent: Equatable {
         let sessionId: String
+        let agent: Agent
         let tokens: Int       // input + output + cache_create (NOT cache_read)
         let usd: Double       // API-rate equivalent
         let at: Date
@@ -134,83 +137,101 @@ final class SessionStateEngine {
     private var usageBuffer: [UsageEvent] = []
     nonisolated static let weekSeconds: TimeInterval = 7 * 24 * 60 * 60
 
-    /// Running totals over the buffer — incremented in `recordUsage`,
+    /// Running per-agent totals over the buffer — incremented in `recordUsage`,
     /// decremented in `pruneExpired` as events age out. Kept as counters
     /// because the clockTick-driven computed properties re-evaluate every
     /// second; reducing a week's worth of events each tick is too hot.
-    private var weeklyTokensTotal: Int = 0
-    private var weeklyDollarsTotal: Double = 0
+    private var weeklyTokensByAgent: [Agent: Int] = [:]
+    private var weeklyDollarsByAgent: [Agent: Double] = [:]
 
-    /// Tokens observed in the last 7 days. Drives the badge and (against the
-    /// user's weekly budget) the brake threshold check.
-    var weeklyTokens: Int {
+    /// Tokens observed in the last 7 days for `agent`. Drives the badge and
+    /// (against the agent's weekly budget) the brake threshold check.
+    func weeklyTokens(for agent: Agent) -> Int {
         _ = clockTick
         pruneExpired()
-        return weeklyTokensTotal
+        return weeklyTokensByAgent[agent] ?? 0
     }
 
-    /// API-rate dollar total over the last 7 days. Informational for
-    /// subscription tiers ("≈$X if billed at API rates").
-    var weeklyDollars: Double {
+    /// API-rate dollar total over the last 7 days for `agent`. Informational
+    /// for subscription tiers ("≈$X if billed at API rates").
+    func weeklyDollars(for agent: Agent) -> Double {
         _ = clockTick
         pruneExpired()
-        return weeklyDollarsTotal
+        return weeklyDollarsByAgent[agent] ?? 0
     }
 
-    /// Tokens observed today (calendar day, local time). Walks the buffer
-    /// from the back and stops at the first pre-midnight event, so the cost
-    /// scales with today's activity, not the whole week.
-    var todayTokens: Int {
+    /// Tokens observed today (calendar day, local time) for `agent`. Walks the
+    /// buffer from the back and stops at the first pre-midnight event, so the
+    /// cost scales with today's activity, not the whole week.
+    func todayTokens(for agent: Agent) -> Int {
         _ = clockTick
         pruneExpired()
         let startOfDay = Calendar.current.startOfDay(for: Date())
         var total = 0
         for ev in usageBuffer.reversed() {
             if ev.at < startOfDay { break }
-            total += ev.tokens
+            if ev.agent == agent { total += ev.tokens }
         }
         return total
     }
 
-    /// API-rate dollars spent today. The primary metric for `.api` tier —
-    /// matches the "Daily $ cap" setting's actual semantics.
-    var dollarsToday: Double {
+    /// API-rate dollars spent today by `agent`. The primary metric for the
+    /// `.api` tier — matches the "Daily $ cap" setting's actual semantics.
+    func dollarsToday(for agent: Agent) -> Double {
         _ = clockTick
         pruneExpired()
         let startOfDay = Calendar.current.startOfDay(for: Date())
         var total: Double = 0
         for ev in usageBuffer.reversed() {
             if ev.at < startOfDay { break }
-            total += ev.usd
+            if ev.agent == agent { total += ev.usd }
         }
         return total
     }
 
-    /// 0…1 fraction of the user's budget consumed. API tier: $ today vs the
+    /// 0…1 fraction of `agent`'s budget consumed. API tier: $ today vs the
     /// daily cap. Subscription: weekly tokens vs the user-set weekly budget.
     /// > 1.0 is possible (you blew through the budget); UI caps display at 100%.
-    var usageFraction: Double {
+    func usageFraction(for agent: Agent) -> Double {
         let settings = AppSettings.shared
-        if settings.planTier.usesDollarBudget {
-            let cap = settings.dailyCapUSD
-            return cap > 0 ? dollarsToday / cap : 0
+        if settings.planTier(for: agent).usesDollarBudget {
+            let cap = settings.dailyCapUSD(for: agent)
+            return cap > 0 ? dollarsToday(for: agent) / cap : 0
         }
-        let budget = Double(settings.weeklyTokenBudget)
-        return budget > 0 ? Double(weeklyTokens) / budget : 0
+        let budget = Double(settings.weeklyTokenBudget(for: agent))
+        return budget > 0 ? Double(weeklyTokens(for: agent)) / budget : 0
     }
 
-    /// True once usageFraction crosses the user-set threshold AND the user
-    /// hasn't dismissed today.
+    /// True once `agent`'s usageFraction crosses the user-set threshold AND
+    /// the user hasn't dismissed today. The "dismiss for today" reset is
+    /// global — one dismissal quiets both agents' brakes for the day.
     private var brakeDismissedAt: Date? = nil
-    var brakeEngaged: Bool {
+    func brakeEngaged(for agent: Agent) -> Bool {
         _ = clockTick
-        guard AppSettings.shared.usageTrackingEnabled else { return false }
+        let settings = AppSettings.shared
+        guard settings.usageTrackingEnabled, settings.showUsage(for: agent) else { return false }
         // "Dismiss for today" — quiet until the calendar day rolls over.
         if let dismissedAt = brakeDismissedAt,
            Calendar.current.isDate(dismissedAt, inSameDayAs: Date()) {
             return false
         }
-        return usageFraction >= AppSettings.shared.brakeThresholdPercent
+        return usageFraction(for: agent) >= AppSettings.shared.brakeThresholdPercent
+    }
+
+    /// True if EITHER agent's brake is engaged. Drives the pill's brake tint
+    /// and the one-shot auto-expand — those are agent-agnostic.
+    var brakeEngaged: Bool {
+        Agent.allCases.contains { brakeEngaged(for: $0) }
+    }
+
+    /// Agents that have any usage to show (tokens this week or $ today). Used
+    /// to decide which per-agent badges the header renders.
+    var agentsWithUsage: [Agent] {
+        _ = clockTick
+        pruneExpired()
+        return Agent.allCases.filter {
+            (weeklyTokensByAgent[$0] ?? 0) > 0 || dollarsToday(for: $0) > 0
+        }
     }
 
     /// Drop events older than `weekSeconds`, keeping the running totals in
@@ -219,8 +240,8 @@ final class SessionStateEngine {
     private func pruneExpired() {
         let cutoff = Date().addingTimeInterval(-Self.weekSeconds)
         while let first = usageBuffer.first, first.at < cutoff {
-            weeklyTokensTotal -= first.tokens
-            weeklyDollarsTotal -= first.usd
+            weeklyTokensByAgent[first.agent, default: 0] -= first.tokens
+            weeklyDollarsByAgent[first.agent, default: 0] -= first.usd
             usageBuffer.removeFirst()
         }
     }
@@ -436,9 +457,9 @@ final class SessionStateEngine {
     ) {
         let key = agent.sessionKey(sessionId)
         // Buffer is event-level; bounded by pruneExpired() on every read.
-        usageBuffer.append(UsageEvent(sessionId: key, tokens: tokens, usd: usd, at: date))
-        weeklyTokensTotal += tokens
-        weeklyDollarsTotal += usd
+        usageBuffer.append(UsageEvent(sessionId: key, agent: agent, tokens: tokens, usd: usd, at: date))
+        weeklyTokensByAgent[agent, default: 0] += tokens
+        weeklyDollarsByAgent[agent, default: 0] += usd
 
         let isRecent = Date().timeIntervalSince(date) < staleTimeout
         guard var session = sessions[key]

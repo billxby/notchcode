@@ -40,8 +40,18 @@ const CRASH_CHECK_TICKS: u32 = 20;
 /// Shared engine handle stored in Tauri state and used by the loop + commands.
 pub type SharedEngine = Arc<Mutex<SessionEngine>>;
 
+/// Per-agent usage figures, metered against that agent's own plan/budget on
+/// the frontend. Serializes as a nested object under each agent key.
+#[derive(Serialize, PartialEq, Clone)]
+struct AgentUsage {
+    weekly_tokens: u64,
+    weekly_dollars: f64,
+    today_tokens: u64,
+    dollars_today: f64,
+}
+
 /// What the frontend gets on every change: pill status + detail, the session
-/// list, and weekly usage. Emitted only when it changes.
+/// list, and per-agent weekly usage. Emitted only when it changes.
 #[derive(Serialize, PartialEq, Clone)]
 struct NotchState {
     status: Status,
@@ -49,10 +59,9 @@ struct NotchState {
     agent: Option<Agent>,
     detail: Option<String>,
     sessions: Vec<SessionInfo>,
-    weekly_tokens: u64,
-    weekly_dollars: f64,
-    today_tokens: u64,
-    dollars_today: f64,
+    /// Usage keyed by agent ("claude" / "codex") — each badge/brake reads its
+    /// own entry. A map (not flat fields) so adding a third agent is free.
+    usage: HashMap<Agent, AgentUsage>,
 }
 
 /// Messages the engine loop consumes from both producers.
@@ -189,15 +198,26 @@ fn run_loop(
                 e.crash_check();
             }
             e.prune();
+            let usage: HashMap<Agent, AgentUsage> = Agent::ALL
+                .into_iter()
+                .map(|a| {
+                    (
+                        a,
+                        AgentUsage {
+                            weekly_tokens: e.weekly_tokens(a),
+                            weekly_dollars: e.weekly_dollars(a),
+                            today_tokens: e.today_tokens(a),
+                            dollars_today: e.dollars_today(a),
+                        },
+                    )
+                })
+                .collect();
             NotchState {
                 status: e.aggregate_status(),
                 agent: e.aggregate_working_agent(),
                 detail: e.aggregate_detail(),
                 sessions: e.snapshot(),
-                weekly_tokens: e.weekly_tokens(),
-                weekly_dollars: e.weekly_dollars(),
-                today_tokens: e.today_tokens(),
-                dollars_today: e.dollars_today(),
+                usage,
             }
         };
 

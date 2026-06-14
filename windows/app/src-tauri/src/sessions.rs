@@ -167,6 +167,9 @@ impl Session {
 }
 
 struct UsageTick {
+    /// Which agent this usage belongs to — weekly/today totals meter per agent
+    /// because Claude and Codex bill on separate plans with separate budgets.
+    agent: Agent,
     tokens: u64,
     usd: f64,
     /// Wall-clock time (not Instant) so "today" can mean the local calendar day.
@@ -182,8 +185,10 @@ fn is_today(t: SystemTime) -> bool {
 pub struct SessionEngine {
     sessions: HashMap<String, Session>,
     usage: Vec<UsageTick>,
-    weekly_tokens: u64,
-    weekly_dollars: f64,
+    /// Running per-agent 7-day totals (kept as counters so state builds don't
+    /// re-sum a week of ticks); decremented in `prune` as ticks age out.
+    weekly_tokens: HashMap<Agent, u64>,
+    weekly_dollars: HashMap<Agent, f64>,
 }
 
 impl SessionEngine {
@@ -191,8 +196,8 @@ impl SessionEngine {
         Self {
             sessions: HashMap::new(),
             usage: Vec::new(),
-            weekly_tokens: 0,
-            weekly_dollars: 0.0,
+            weekly_tokens: HashMap::new(),
+            weekly_dollars: HashMap::new(),
         }
     }
 
@@ -308,12 +313,13 @@ impl SessionEngine {
         }
         let now = Instant::now();
         self.usage.push(UsageTick {
+            agent,
             tokens,
             usd,
             at: SystemTime::now(),
         });
-        self.weekly_tokens += tokens;
-        self.weekly_dollars += usd;
+        *self.weekly_tokens.entry(agent).or_insert(0) += tokens;
+        *self.weekly_dollars.entry(agent).or_insert(0.0) += usd;
 
         let key = agent.session_key(session_id);
         let entry = self
@@ -418,12 +424,13 @@ impl SessionEngine {
             }
             let usd = cost::cost(usage, *model);
             self.usage.push(UsageTick {
+                agent,
                 tokens,
                 usd,
                 at: mtime,
             });
-            self.weekly_tokens += tokens;
-            self.weekly_dollars += usd;
+            *self.weekly_tokens.entry(agent).or_insert(0) += tokens;
+            *self.weekly_dollars.entry(agent).or_insert(0.0) += usd;
             row_usd += usd;
         }
 
@@ -583,30 +590,30 @@ impl SessionEngine {
             .and_then(|s| s.detail.clone())
     }
 
-    pub fn weekly_tokens(&self) -> u64 {
-        self.weekly_tokens
+    pub fn weekly_tokens(&self, agent: Agent) -> u64 {
+        self.weekly_tokens.get(&agent).copied().unwrap_or(0)
     }
 
-    pub fn weekly_dollars(&self) -> f64 {
-        self.weekly_dollars
+    pub fn weekly_dollars(&self, agent: Agent) -> f64 {
+        self.weekly_dollars.get(&agent).copied().unwrap_or(0.0)
     }
 
-    /// Tokens observed today (local calendar day). Scales the brake/today
-    /// figures with today's activity, not the whole week.
-    pub fn today_tokens(&self) -> u64 {
+    /// Tokens observed today (local calendar day) for `agent`. Scales the
+    /// brake/today figures with today's activity, not the whole week.
+    pub fn today_tokens(&self, agent: Agent) -> u64 {
         self.usage
             .iter()
-            .filter(|t| is_today(t.at))
+            .filter(|t| t.agent == agent && is_today(t.at))
             .map(|t| t.tokens)
             .sum()
     }
 
-    /// API-rate dollars spent today — the primary metric for the API tier,
-    /// matching the "daily $ cap" setting's semantics.
-    pub fn dollars_today(&self) -> f64 {
+    /// API-rate dollars spent today by `agent` — the primary metric for the
+    /// API tier, matching the "daily $ cap" setting's semantics.
+    pub fn dollars_today(&self, agent: Agent) -> f64 {
         self.usage
             .iter()
-            .filter(|t| is_today(t.at))
+            .filter(|t| t.agent == agent && is_today(t.at))
             .map(|t| t.usd)
             .sum()
     }
@@ -669,19 +676,27 @@ impl SessionEngine {
         // Wall-clock here (usage ticks are SystemTime); a clock that jumped
         // backwards just keeps the tick (treat as still fresh).
         let wall = SystemTime::now();
-        let mut removed_tokens = 0u64;
-        let mut removed_dollars = 0.0f64;
+        // Accumulate removals into locals first — the retain closure can't also
+        // borrow self.weekly_* while self.usage is mutably borrowed.
+        let mut removed_tokens: HashMap<Agent, u64> = HashMap::new();
+        let mut removed_dollars: HashMap<Agent, f64> = HashMap::new();
         self.usage.retain(|t| {
             if wall.duration_since(t.at).map(|d| d < WEEK).unwrap_or(true) {
                 true
             } else {
-                removed_tokens += t.tokens;
-                removed_dollars += t.usd;
+                *removed_tokens.entry(t.agent).or_insert(0) += t.tokens;
+                *removed_dollars.entry(t.agent).or_insert(0.0) += t.usd;
                 false
             }
         });
-        self.weekly_tokens = self.weekly_tokens.saturating_sub(removed_tokens);
-        self.weekly_dollars = (self.weekly_dollars - removed_dollars).max(0.0);
+        for (agent, tok) in removed_tokens {
+            let e = self.weekly_tokens.entry(agent).or_insert(0);
+            *e = e.saturating_sub(tok);
+        }
+        for (agent, usd) in removed_dollars {
+            let e = self.weekly_dollars.entry(agent).or_insert(0.0);
+            *e = (*e - usd).max(0.0);
+        }
     }
 }
 

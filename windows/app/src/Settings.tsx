@@ -14,9 +14,14 @@ import {
   type WorkingAnimation,
   AGENT_LABELS,
   PLAN_LABELS,
+  PLAN_TIERS_FOR,
   PLAN_DEFAULT_BUDGET,
   WORKING_ANIM_LABELS,
   usesDollarBudget,
+  planTierFor,
+  weeklyBudgetFor,
+  dailyCapFor,
+  showUsageFor,
   compactTokens,
 } from "./types";
 
@@ -139,16 +144,26 @@ export default function SettingsView({
     setAutostart(await invoke<boolean>("autostart_enabled"));
   }
 
-  function setPlan(tier: PlanTier) {
+  // Per-agent field keys — the Claude trio is un-prefixed (migration), Codex
+  // mirrors it.
+  const planKey = (agent: Agent) =>
+    agent === "claude" ? "plan_tier" : "codex_plan_tier";
+  const budgetKey = (agent: Agent) =>
+    agent === "claude" ? "weekly_token_budget" : "codex_weekly_token_budget";
+  const capKey = (agent: Agent) =>
+    agent === "claude" ? "daily_cap_usd" : "codex_daily_cap_usd";
+  const showKey = (agent: Agent) =>
+    agent === "claude" ? "show_usage_claude" : "show_usage_codex";
+
+  function setPlan(agent: Agent, tier: PlanTier) {
     // Switching tiers re-seeds the weekly budget with the new tier's preset.
     if (usesDollarBudget(tier)) {
-      patch({ plan_tier: tier });
+      patch({ [planKey(agent)]: tier });
     } else {
-      patch({ plan_tier: tier, weekly_token_budget: PLAN_DEFAULT_BUDGET[tier] });
+      patch({ [planKey(agent)]: tier, [budgetKey(agent)]: PLAN_DEFAULT_BUDGET[tier] });
     }
   }
 
-  const dollarBudget = usesDollarBudget(settings.plan_tier);
   const tracking = settings.usage_tracking_enabled;
 
   return (
@@ -174,113 +189,144 @@ export default function SettingsView({
             />
           </div>
 
-          <div className="set-row">
-            <span className="set-label">Your plan</span>
-            <select
-              className="select"
-              value={settings.plan_tier}
-              disabled={!tracking}
-              onChange={(e) => setPlan(e.target.value as PlanTier)}
-            >
-              {(Object.keys(PLAN_LABELS) as PlanTier[]).map((t) => (
-                <option key={t} value={t}>
-                  {PLAN_LABELS[t]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {dollarBudget ? (
-            <div className="set-row">
-              <span className="set-label">Daily $ cap</span>
-              <div className="stepper">
-                <button
-                  disabled={!tracking}
-                  onClick={() =>
-                    patch({ daily_cap_usd: Math.max(1, settings.daily_cap_usd - 5) })
-                  }
-                >
-                  −
-                </button>
-                <span className="stepper-val">
-                  ${settings.daily_cap_usd.toFixed(0)}
-                </span>
-                <button
-                  disabled={!tracking}
-                  onClick={() =>
-                    patch({ daily_cap_usd: Math.min(500, settings.daily_cap_usd + 5) })
-                  }
-                >
-                  +
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="set-row">
-                <span className="set-label">Weekly budget</span>
-                <div className="stepper">
-                  <button
-                    disabled={!tracking}
-                    onClick={() =>
-                      patch({
-                        weekly_token_budget: Math.max(
-                          1_000_000,
-                          settings.weekly_token_budget -
-                            budgetStep(settings.weekly_token_budget - 1)
-                        ),
-                      })
-                    }
-                  >
-                    −
-                  </button>
-                  <span className="stepper-val">
-                    {compactTokens(settings.weekly_token_budget)}
-                  </span>
-                  <button
-                    disabled={!tracking}
-                    onClick={() =>
-                      patch({
-                        weekly_token_budget:
-                          settings.weekly_token_budget +
-                          budgetStep(settings.weekly_token_budget),
-                      })
-                    }
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              <div className="set-stack">
+          {/* Each agent carries its own plan + budget — Claude and Codex bill
+              on separate plans, so each is metered against its own limit. */}
+          {(["claude", "codex"] as Agent[]).map((agent, idx) => {
+            const tier = planTierFor(settings, agent);
+            const dollar = usesDollarBudget(tier);
+            return (
+              <div
+                key={agent}
+                className="agent-plan"
+                style={idx > 0 ? { marginTop: 4 } : undefined}
+              >
                 <div className="set-row">
-                  <span className="set-label">Brake fires at</span>
-                  <span className="set-value">
-                    {Math.round(settings.brake_threshold_percent * 100)}% of budget
+                  <span className="set-label">
+                    Show {AGENT_LABELS[agent]} in the notch
                   </span>
+                  <Toggle
+                    checked={showUsageFor(settings, agent)}
+                    disabled={!tracking}
+                    onChange={(v) => patch({ [showKey(agent)]: v })}
+                  />
                 </div>
-                <input
-                  type="range"
-                  className="slider"
-                  min={0.5}
-                  max={1}
-                  step={0.05}
-                  disabled={!tracking}
-                  value={settings.brake_threshold_percent}
-                  onChange={(e) =>
-                    patch({ brake_threshold_percent: Number(e.target.value) })
-                  }
-                />
+                <div className="set-row">
+                  <span className="set-sublabel">{AGENT_LABELS[agent]} plan</span>
+                  <select
+                    className="select"
+                    value={tier}
+                    disabled={!tracking}
+                    onChange={(e) => setPlan(agent, e.target.value as PlanTier)}
+                  >
+                    {PLAN_TIERS_FOR[agent].map((t) => (
+                      <option key={t} value={t}>
+                        {PLAN_LABELS[t]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {dollar ? (
+                  <div className="set-row">
+                    <span className="set-sublabel">Daily $ cap</span>
+                    <div className="stepper">
+                      <button
+                        disabled={!tracking}
+                        onClick={() =>
+                          patch({
+                            [capKey(agent)]: Math.max(1, dailyCapFor(settings, agent) - 5),
+                          })
+                        }
+                      >
+                        −
+                      </button>
+                      <span className="stepper-val">
+                        ${dailyCapFor(settings, agent).toFixed(0)}
+                      </span>
+                      <button
+                        disabled={!tracking}
+                        onClick={() =>
+                          patch({
+                            [capKey(agent)]: Math.min(
+                              500,
+                              dailyCapFor(settings, agent) + 5
+                            ),
+                          })
+                        }
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="set-row">
+                    <span className="set-sublabel">Weekly budget</span>
+                    <div className="stepper">
+                      <button
+                        disabled={!tracking}
+                        onClick={() =>
+                          patch({
+                            [budgetKey(agent)]: Math.max(
+                              1_000_000,
+                              weeklyBudgetFor(settings, agent) -
+                                budgetStep(weeklyBudgetFor(settings, agent) - 1)
+                            ),
+                          })
+                        }
+                      >
+                        −
+                      </button>
+                      <span className="stepper-val">
+                        {compactTokens(weeklyBudgetFor(settings, agent))}
+                      </span>
+                      <button
+                        disabled={!tracking}
+                        onClick={() =>
+                          patch({
+                            [budgetKey(agent)]:
+                              weeklyBudgetFor(settings, agent) +
+                              budgetStep(weeklyBudgetFor(settings, agent)),
+                          })
+                        }
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </>
-          )}
+            );
+          })}
+
+          {/* Brake threshold is shared: one percentage applied to whichever
+              agent's budget (or daily cap) is in play. */}
+          <div className="set-stack">
+            <div className="set-row">
+              <span className="set-label">Brake fires at</span>
+              <span className="set-value">
+                {Math.round(settings.brake_threshold_percent * 100)}% of budget
+              </span>
+            </div>
+            <input
+              type="range"
+              className="slider"
+              min={0.5}
+              max={1}
+              step={0.05}
+              disabled={!tracking}
+              value={settings.brake_threshold_percent}
+              onChange={(e) =>
+                patch({ brake_threshold_percent: Number(e.target.value) })
+              }
+            />
+          </div>
 
           <div className="set-note">
             <span className="note-icon">ⓘ</span>
             <span>
-              Token counts are exact, parsed from this PC's Claude Code logs —
-              sessions on other devices aren't counted. The budget is your own
-              gauge; Anthropic doesn't publish per-plan token limits.
+              Token counts are exact, parsed from this PC's logs — sessions on
+              other devices aren't counted. Each budget is your own gauge;
+              providers don't publish per-plan token limits.
             </span>
           </div>
         </Section>

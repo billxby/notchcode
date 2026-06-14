@@ -205,93 +205,126 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
                 .tint(.blue)
 
-                HStack {
-                    Text("Your plan")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { settings.planTier },
-                        set: { settings.planTier = $0 }
-                    )) {
-                        ForEach(AppSettings.PlanTier.allCases) { tier in
-                            Text(tier.displayName).tag(tier)
-                        }
+                // Each agent carries its own plan + budget — Claude and Codex
+                // bill on separate plans, so the badge and brake meter each
+                // against the right limit.
+                agentPlanControls(.claude)
+                Divider().overlay(.white.opacity(0.08))
+                agentPlanControls(.codex)
+
+                Divider().overlay(.white.opacity(0.08))
+
+                // Brake threshold is shared: one percentage applied to whichever
+                // agent's budget (or daily cap) is in play.
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Brake fires at")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.75))
+                        Spacer()
+                        Text("\(Int(settings.brakeThresholdPercent * 100))% of budget")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
                     }
-                    .labelsHidden()
-                    .frame(width: 200)
+                    Slider(
+                        value: Binding(
+                            get: { settings.brakeThresholdPercent },
+                            set: { settings.brakeThresholdPercent = $0 }
+                        ),
+                        in: 0.5...1.0,
+                        step: 0.05
+                    )
+                    .tint(.orange)
                     .disabled(!settings.usageTrackingEnabled)
                 }
 
-                if settings.planTier.usesDollarBudget {
-                    HStack {
-                        Text("Daily $ cap")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.75))
-                        Spacer()
-                        Stepper(
-                            value: Binding(
-                                get: { settings.dailyCapUSD },
-                                set: { settings.dailyCapUSD = $0 }
-                            ),
-                            in: 1...500,
-                            step: 5
-                        ) {
-                            Text(String(format: "$%.0f", settings.dailyCapUSD))
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.85))
-                                .frame(width: 60, alignment: .trailing)
-                        }
-                        .disabled(!settings.usageTrackingEnabled)
-                    }
-                } else {
-                    // Weekly token budget — what the badge color and the
-                    // brake measure against. Seeded by the tier preset above;
-                    // fully user-editable. Coarser steps at higher budgets so
-                    // a Max 20× user isn't clicking through 200 stops.
-                    HStack {
-                        Text("Weekly budget")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.75))
-                        Spacer()
-                        Stepper {
-                            Text("\(compactTokenCount(settings.weeklyTokenBudget)) tokens")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.85))
-                                .frame(width: 90, alignment: .trailing)
-                        } onIncrement: {
-                            settings.weeklyTokenBudget += budgetStep(settings.weeklyTokenBudget)
-                        } onDecrement: {
-                            let step = budgetStep(settings.weeklyTokenBudget - 1)
-                            settings.weeklyTokenBudget = max(1_000_000, settings.weeklyTokenBudget - step)
-                        }
-                        .disabled(!settings.usageTrackingEnabled)
-                    }
+                approximationNote
+            }
+        }
+    }
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Brake fires at")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.white.opacity(0.75))
-                            Spacer()
-                            Text("\(Int(settings.brakeThresholdPercent * 100))% of budget")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.85))
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { settings.brakeThresholdPercent },
-                                set: { settings.brakeThresholdPercent = $0 }
-                            ),
-                            in: 0.5...1.0,
-                            step: 0.05
-                        )
-                        .tint(.orange)
-                        .disabled(!settings.usageTrackingEnabled)
+    /// Plan picker + budget/$-cap stepper for a single agent.
+    @ViewBuilder
+    private func agentPlanControls(_ agent: Agent) -> some View {
+        let tier = settings.planTier(for: agent)
+        VStack(alignment: .leading, spacing: 10) {
+            // Per-agent chip visibility — show both, either, or neither.
+            Toggle(isOn: Binding(
+                get: { settings.showUsage(for: agent) },
+                set: { settings.setShowUsage($0, for: agent) }
+            )) {
+                Text("Show \(agent.displayName) in the notch")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            .toggleStyle(.switch)
+            .tint(.blue)
+            .disabled(!settings.usageTrackingEnabled)
+
+            HStack {
+                Text("\(agent.displayName) plan")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.75))
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { settings.planTier(for: agent) },
+                    set: { settings.setPlanTier($0, for: agent) }
+                )) {
+                    ForEach(AppSettings.PlanTier.tiers(for: agent)) { t in
+                        Text(t.displayName).tag(t)
                     }
                 }
+                .labelsHidden()
+                .frame(width: 200)
+                .disabled(!settings.usageTrackingEnabled)
+            }
 
-                approximationNote
+            if tier.usesDollarBudget {
+                HStack {
+                    Text("Daily $ cap")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.6))
+                    Spacer()
+                    Stepper(
+                        value: Binding(
+                            get: { settings.dailyCapUSD(for: agent) },
+                            set: { settings.setDailyCapUSD($0, for: agent) }
+                        ),
+                        in: 1...500,
+                        step: 5
+                    ) {
+                        Text(String(format: "$%.0f", settings.dailyCapUSD(for: agent)))
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 60, alignment: .trailing)
+                    }
+                    .disabled(!settings.usageTrackingEnabled)
+                }
+            } else {
+                // Weekly token budget — what the badge color and the brake
+                // measure against. Seeded by the tier preset above; fully
+                // user-editable. Coarser steps at higher budgets so a Max 20×
+                // user isn't clicking through 200 stops.
+                HStack {
+                    Text("Weekly budget")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.6))
+                    Spacer()
+                    Stepper {
+                        Text("\(compactTokenCount(settings.weeklyTokenBudget(for: agent))) tokens")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 90, alignment: .trailing)
+                    } onIncrement: {
+                        let current = settings.weeklyTokenBudget(for: agent)
+                        settings.setWeeklyTokenBudget(current + budgetStep(current), for: agent)
+                    } onDecrement: {
+                        let current = settings.weeklyTokenBudget(for: agent)
+                        let step = budgetStep(current - 1)
+                        settings.setWeeklyTokenBudget(max(1_000_000, current - step), for: agent)
+                    }
+                    .disabled(!settings.usageTrackingEnabled)
+                }
             }
         }
     }

@@ -50,29 +50,75 @@ export type SessionDetail = SessionInfo & {
   messages: MessageInfo[];
 };
 
-export type NotchState = {
-  status: Status;
-  /** Agent driving a working aggregate, so the collapsed pill tints by agent. */
-  agent: Agent | null;
-  detail: string | null;
-  sessions: SessionInfo[];
+/** Per-agent usage figures (mirrors the Rust `AgentUsage`). */
+export type AgentUsage = {
   weekly_tokens: number;
   weekly_dollars: number;
   today_tokens: number;
   dollars_today: number;
 };
 
+const EMPTY_USAGE: AgentUsage = {
+  weekly_tokens: 0,
+  weekly_dollars: 0,
+  today_tokens: 0,
+  dollars_today: 0,
+};
+
+export type NotchState = {
+  status: Status;
+  /** Agent driving a working aggregate, so the collapsed pill tints by agent. */
+  agent: Agent | null;
+  detail: string | null;
+  sessions: SessionInfo[];
+  /** Usage keyed by agent — each badge/brake reads its own entry. */
+  usage: Record<Agent, AgentUsage>;
+};
+
+/** Usage for one agent, tolerating an absent entry (older backend payloads). */
+export function agentUsage(state: NotchState, agent: Agent): AgentUsage {
+  return state.usage?.[agent] ?? EMPTY_USAGE;
+}
+
+/** Agents with something to show (tokens this week or $ today). */
+export function agentsWithUsage(state: NotchState): Agent[] {
+  return (["claude", "codex"] as Agent[]).filter((a) => {
+    const u = agentUsage(state, a);
+    return u.weekly_tokens > 0 || u.dollars_today > 0;
+  });
+}
+
 // ---- Settings (mirrors the Rust `settings::AppSettings`) --------------------
 
-export type PlanTier = "free" | "pro" | "max5" | "max20" | "api";
+// Claude tiers + Codex tiers + the shared `api`. `codexpro` is distinct from
+// Claude's `pro` (different default budget) but labels as "Pro".
+export type PlanTier =
+  | "free"
+  | "pro"
+  | "max5"
+  | "max20"
+  | "plus"
+  | "codexpro"
+  | "business"
+  | "enterprise"
+  | "api";
 export type WorkingAnimation = "spinner" | "pulse" | "mascot";
 
 export type AppSettings = {
+  // Per-agent plan/budget. The Claude trio keeps the original un-prefixed field
+  // names (migration); the Codex trio mirrors them.
   plan_tier: PlanTier;
   weekly_token_budget: number;
-  usage_tracking_enabled: boolean;
-  brake_threshold_percent: number;
   daily_cap_usd: number;
+  codex_plan_tier: PlanTier;
+  codex_weekly_token_budget: number;
+  codex_daily_cap_usd: number;
+  usage_tracking_enabled: boolean;
+  /** Per-agent chip visibility — show both, either, or neither. */
+  show_usage_claude: boolean;
+  show_usage_codex: boolean;
+  /** Shared by both agents. */
+  brake_threshold_percent: number;
   working_animation: WorkingAnimation;
   /** Toast when a session blocks on the user (permission / request_user_input). */
   notify_on_waiting: boolean;
@@ -85,7 +131,17 @@ export const PLAN_LABELS: Record<PlanTier, string> = {
   pro: "Pro",
   max5: "Max (5×)",
   max20: "Max (20×)",
+  plus: "Plus",
+  codexpro: "Pro",
+  business: "Business",
+  enterprise: "Enterprise",
   api: "API key (pay-per-token)",
+};
+
+/** Tiers offered per agent's "Your plan" picker. */
+export const PLAN_TIERS_FOR: Record<Agent, PlanTier[]> = {
+  claude: ["free", "pro", "max5", "max20", "api"],
+  codex: ["plus", "codexpro", "business", "enterprise", "api"],
 };
 
 /** Suggested weekly token budget per tier — mirrors PlanTier in settings.rs. */
@@ -94,6 +150,10 @@ export const PLAN_DEFAULT_BUDGET: Record<PlanTier, number> = {
   pro: 10_000_000,
   max5: 50_000_000,
   max20: 200_000_000,
+  plus: 10_000_000,
+  codexpro: 50_000_000,
+  business: 100_000_000,
+  enterprise: 300_000_000,
   api: 0,
 };
 
@@ -108,19 +168,43 @@ export function usesDollarBudget(tier: PlanTier): boolean {
   return tier === "api";
 }
 
+// ---- Per-agent settings accessors -------------------------------------------
+
+export function planTierFor(settings: AppSettings, agent: Agent): PlanTier {
+  return agent === "claude" ? settings.plan_tier : settings.codex_plan_tier;
+}
+
+export function weeklyBudgetFor(settings: AppSettings, agent: Agent): number {
+  return agent === "claude"
+    ? settings.weekly_token_budget
+    : settings.codex_weekly_token_budget;
+}
+
+export function dailyCapFor(settings: AppSettings, agent: Agent): number {
+  return agent === "claude" ? settings.daily_cap_usd : settings.codex_daily_cap_usd;
+}
+
+/** Whether this agent's segment should appear in the notch chip / brake. */
+export function showUsageFor(settings: AppSettings, agent: Agent): boolean {
+  return agent === "claude" ? settings.show_usage_claude : settings.show_usage_codex;
+}
+
 /**
- * 0…1 fraction of the user's budget consumed. API: $ today vs the daily cap.
+ * 0…1 fraction of `agent`'s budget consumed. API: $ today vs the daily cap.
  * Subscription: weekly tokens vs the weekly budget. >1 is possible (over budget).
  */
-export function usageFraction(state: NotchState, settings: AppSettings): number {
-  if (usesDollarBudget(settings.plan_tier)) {
-    return settings.daily_cap_usd > 0
-      ? state.dollars_today / settings.daily_cap_usd
-      : 0;
+export function usageFraction(
+  state: NotchState,
+  settings: AppSettings,
+  agent: Agent
+): number {
+  const u = agentUsage(state, agent);
+  if (usesDollarBudget(planTierFor(settings, agent))) {
+    const cap = dailyCapFor(settings, agent);
+    return cap > 0 ? u.dollars_today / cap : 0;
   }
-  return settings.weekly_token_budget > 0
-    ? state.weekly_tokens / settings.weekly_token_budget
-    : 0;
+  const budget = weeklyBudgetFor(settings, agent);
+  return budget > 0 ? u.weekly_tokens / budget : 0;
 }
 
 /** 950 → "950", 8_234_000 → "8.2M", 1_050_000_000 → "1.1B". Drops ".0". */
