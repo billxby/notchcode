@@ -12,6 +12,15 @@ import SettingsView from "./Settings";
 import MarkdownText from "./MarkdownText";
 import { StatusIndicator, StatusDot } from "./Indicators";
 import {
+  IconGear,
+  IconChevronLeft,
+  IconX,
+  IconJump,
+  IconStop,
+  IconBolt,
+  IconRing,
+} from "./Icons";
+import {
   compactTokens,
   formatCost,
   formatRuntime,
@@ -189,23 +198,26 @@ function BrakeBanner({
 // ---- Panel: session list ----------------------------------------------------
 
 function RowButton({
-  glyph,
+  icon,
   variant,
+  title,
   onClick,
 }: {
-  glyph: string;
+  icon: React.ReactNode;
   variant?: string;
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       className={`row-btn ${variant ?? ""}`}
+      title={title}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
     >
-      {glyph}
+      {icon}
     </button>
   );
 }
@@ -266,7 +278,7 @@ function PanelView({
           }}
           title="Settings"
         >
-          ⚙
+          <IconGear />
         </button>
       </div>
       <div className="sheet-divider" />
@@ -287,12 +299,16 @@ function PanelView({
         {state.sessions.length === 0 ? (
           hooksInstalled ? (
             <div className="empty-state">
-              <div className="empty-glyph">◌</div>
+              <div className="empty-glyph">
+                <IconRing size={30} />
+              </div>
               <div className="empty-text">No active sessions</div>
             </div>
           ) : (
             <div className="empty-state install">
-              <div className="empty-glyph warn">⚡</div>
+              <div className="empty-glyph warn">
+                <IconBolt size={28} />
+              </div>
               <div className="empty-title">Hooks not installed</div>
               <div className="empty-text">
                 Open Settings to wire Notchcode into Claude Code.
@@ -343,20 +359,23 @@ function PanelView({
                   )}
                 {s.ended ? (
                   <RowButton
-                    glyph="✕"
+                    icon={<IconX size={13} />}
+                    title="Remove"
                     onClick={() => invoke("remove_session", { id: s.id })}
                   />
                 ) : (
                   <>
                     {s.has_terminal && (
                       <RowButton
-                        glyph="↗"
+                        icon={<IconJump size={13} />}
+                        title="Focus terminal"
                         variant={s.status === "waiting" ? "warn" : undefined}
                         onClick={() => invoke("focus_terminal", { id: s.id })}
                       />
                     )}
                     <RowButton
-                      glyph="■"
+                      icon={<IconStop size={11} />}
+                      title="End session"
                       variant="danger"
                       onClick={() => invoke("end_session", { id: s.id })}
                     />
@@ -384,8 +403,8 @@ function DetailView({
     return (
       <div className="sheet-inner">
         <div className="sheet-header">
-          <button className="gear-btn" onClick={onBack}>
-            ‹
+          <button className="gear-btn" onClick={onBack} title="Back">
+            <IconChevronLeft />
           </button>
           <span className="header-title">Session</span>
         </div>
@@ -402,7 +421,7 @@ function DetailView({
     <div className="sheet-inner">
       <div className="sheet-header">
         <button className="gear-btn" onClick={onBack} title="Back">
-          ‹
+          <IconChevronLeft />
         </button>
         <StatusDot status={detail.status} />
         <span className="header-title">{detail.project || "Session"}</span>

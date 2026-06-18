@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { IconGear, IconInfo, IconCheck, IconBang } from "./Icons";
 import {
   type AppSettings,
   type Agent,
@@ -169,7 +170,9 @@ export default function SettingsView({
   return (
     <div className="sheet-inner settings">
       <div className="sheet-header">
-        <span className="header-icon">⚙</span>
+        <span className="header-icon">
+          <IconGear size={14} />
+        </span>
         <span className="header-title">Settings</span>
         <span className="spacer" />
         <button className="pill-btn" onClick={onClose}>
@@ -322,7 +325,9 @@ export default function SettingsView({
           </div>
 
           <div className="set-note">
-            <span className="note-icon">ⓘ</span>
+            <span className="note-icon">
+              <IconInfo size={13} />
+            </span>
             <span>
               Token counts are exact, parsed from this PC's logs — sessions on
               other devices aren't counted. Each budget is your own gauge;
@@ -370,8 +375,15 @@ export default function SettingsView({
               >
                 <div className="set-row">
                   <span className={`status-chip ${isInstalled ? "ok" : "warn"}`}>
-                    {AGENT_LABELS[agent]} —{" "}
-                    {isInstalled ? "✓ hooks installed" : "! hooks not installed"}
+                    {isInstalled ? (
+                      <IconCheck size={13} />
+                    ) : (
+                      <IconBang size={13} />
+                    )}
+                    <span>
+                      {AGENT_LABELS[agent]} —{" "}
+                      {isInstalled ? "hooks installed" : "hooks not installed"}
+                    </span>
                   </span>
                 </div>
                 <div className="set-help">

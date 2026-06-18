@@ -2,20 +2,49 @@
    styling in overlay.rs). Everything stays transparent except the pill and the
    sheet, or the notch illusion breaks. Visual language mirrors the macOS app:
    a black notch that drops a rounded sheet, translucent cards, capsule
-   controls, Claude-orange working accent, hairline dividers. */
+   controls, Claude-orange working accent, hairline dividers.
+
+   Refinement pass (2026-06): same palette, real visual system — a layered
+   elevation scale, a tighter type/spacing rhythm, custom SVG icons (Icons.tsx)
+   in place of emoji, and motion on every interactive surface. Pure styling:
+   behavior, layout, and window-sizing are unchanged. */
 
 :root {
+  /* Surfaces — the sheet is a faint top-lit gradient, not a flat fill, so it
+     reads as a physical panel dropping out of the notch. */
   --surface: rgba(22, 22, 24, 0.975);
+  --surface-top: rgba(34, 34, 38, 0.975);
+  --surface-bottom: rgba(19, 19, 21, 0.975);
+
   --text: #e8e8ea;
-  --text-2: #a0a0a8;
-  --text-3: #6f6f76;
+  --text-2: #a8a8b0;
+  --text-3: #74747c;
   --hair: rgba(255, 255, 255, 0.08);
-  --fill: rgba(255, 255, 255, 0.06);
+  --hair-strong: rgba(255, 255, 255, 0.12);
+  --fill: rgba(255, 255, 255, 0.055);
   --fill-2: rgba(255, 255, 255, 0.1);
+  --fill-3: rgba(255, 255, 255, 0.15);
+  --highlight: rgba(255, 255, 255, 0.07); /* inner top edge of raised cards */
+
   --accent: #ff9d3d; /* Claude working orange */
+  --accent-soft: rgba(255, 157, 61, 0.16);
   --waiting: #ffb23d;
   --done: #4ade80;
   --user: #8b93ff;
+  --danger: #ff8a86;
+
+  /* Elevation — one consistent shadow scale instead of ad-hoc values. */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --elev-2: 0 2px 6px rgba(0, 0, 0, 0.28), 0 8px 20px rgba(0, 0, 0, 0.34);
+  --elev-3: 0 4px 12px rgba(0, 0, 0, 0.3), 0 22px 46px rgba(0, 0, 0, 0.5);
+
+  /* Motion — one rhythm for everything. */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --t-fast: 110ms;
+  --t-med: 170ms;
+
+  --num: "tnum" 1, "lnum" 1; /* tabular figures for data, applied per-element */
 
   font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
     -apple-system, sans-serif;
@@ -43,6 +72,13 @@ body,
   align-items: center;
 }
 
+/* Inline SVG icons (Icons.tsx) inherit text color and sit on the text baseline
+   wherever they replace a glyph. */
+svg {
+  display: block;
+  flex: none;
+}
+
 /* ---- Resting pill -------------------------------------------------------- */
 
 .notch-wrap {
@@ -64,17 +100,17 @@ body,
 .notch-bg {
   position: absolute;
   inset: 0;
-  display: block;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3))
-    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.32));
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.32))
+    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.34));
 }
 
 /* Floating blob — layered lift + faint top highlight. */
 .blob-bg {
   position: absolute;
   inset: 0;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 2px 4px rgba(0, 0, 0, 0.25), 0 8px 22px rgba(0, 0, 0, 0.36);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), var(--elev-2);
 }
 
 .notch-content {
@@ -89,13 +125,14 @@ body,
 .pill-content {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   max-width: 180px;
 }
 
 .pill-detail {
   font-size: 10px;
-  color: #cfd0d4;
+  letter-spacing: 0.01em;
+  color: #d2d3d8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -120,17 +157,21 @@ body,
   display: inline-block;
   flex: none;
 }
+/* A soft halo on live states so the dot reads as "lit", not painted on. */
 .status-idle {
   background: #5b5b5f;
 }
 .status-working {
   background: var(--accent);
+  box-shadow: 0 0 7px rgba(255, 157, 61, 0.6);
 }
 .status-waiting {
   background: var(--waiting);
+  box-shadow: 0 0 7px rgba(255, 178, 61, 0.55);
 }
 .status-done {
   background: var(--done);
+  box-shadow: 0 0 7px rgba(74, 222, 128, 0.5);
 }
 
 .glyph-spinner {
@@ -158,28 +199,28 @@ body,
   }
 }
 
+/* SVG status icons share the animated wrappers below; currentColor carries the
+   level color, the keyframes carry the motion. */
 .glyph-waiting {
+  display: inline-flex;
   color: var(--waiting);
-  font-size: 13px;
-  font-weight: 800;
-  line-height: 1;
-  animation: blink 0.6s ease-in-out infinite alternate;
+  filter: drop-shadow(0 0 4px rgba(255, 178, 61, 0.5));
+  animation: blink 0.62s ease-in-out infinite alternate;
 }
 @keyframes blink {
   from {
     opacity: 1;
   }
   to {
-    opacity: 0.45;
+    opacity: 0.5;
   }
 }
 
 .glyph-check {
+  display: inline-flex;
   color: var(--done);
-  font-size: 13px;
-  font-weight: 800;
-  line-height: 1;
-  animation: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.45));
+  animation: pop 0.42s var(--spring);
 }
 @keyframes pop {
   0% {
@@ -187,7 +228,7 @@ body,
     opacity: 0;
   }
   60% {
-    transform: scale(1.25);
+    transform: scale(1.2);
   }
   100% {
     transform: scale(1);
@@ -269,12 +310,18 @@ body,
   width: 340px; /* default — overridden inline by the drag-resizable width */
   max-height: 440px;
   display: flex;
-  background: var(--surface);
+  background: linear-gradient(
+    180deg,
+    var(--surface-top) 0%,
+    var(--surface) 38%,
+    var(--surface-bottom) 100%
+  );
   color: var(--text);
   overflow: hidden;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 40px rgba(0, 0, 0, 0.46);
-  animation: sheet-in 0.18s ease-out;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.045), var(--elev-3);
+  animation: sheet-in 0.22s var(--spring);
+  transform-origin: top center;
 }
 
 /* Session-list view: a fixed box sized for ~5 rows (47px header + divider +
@@ -294,17 +341,22 @@ body,
   height: 100%;
   cursor: ew-resize;
 }
-.sheet-resize:hover::after,
-.sheet-resize:active::after {
+.sheet-resize::after {
   content: "";
   position: absolute;
   top: 50%;
   right: 2px;
   transform: translateY(-50%);
   width: 3px;
-  height: 36px;
+  height: 34px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.22);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.sheet-resize:hover::after,
+.sheet-resize:active::after {
+  opacity: 1;
 }
 /* Docked: flush at the screen edge, only the bottom corners round — reads as
    "the notch is dropping a sheet downward." Floating: a free rounded card. */
@@ -317,11 +369,11 @@ body,
 @keyframes sheet-in {
   from {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(-8px) scale(0.985);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -337,19 +389,21 @@ body,
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 16px 10px;
+  padding: 13px 16px 11px;
   flex: none;
 }
 
 .header-icon {
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
   color: var(--text-2);
 }
 
 .header-title {
   font-size: 13px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.92);
+  letter-spacing: -0.01em;
+  color: rgba(255, 255, 255, 0.94);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -362,7 +416,13 @@ body,
 
 .sheet-divider {
   height: 1px;
-  background: var(--hair);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--hair) 12%,
+    var(--hair) 88%,
+    transparent
+  );
   flex: none;
 }
 
@@ -378,41 +438,54 @@ body,
 .pill-btn {
   font-family: inherit;
   font-size: 11px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.8);
+  font-weight: 550;
+  color: rgba(255, 255, 255, 0.82);
   background: var(--fill-2);
   border: none;
   border-radius: 999px;
   padding: 4px 11px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
 }
 .pill-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--fill-3);
+}
+.pill-btn:active {
+  transform: scale(0.95);
 }
 .pill-btn.danger {
-  color: #ff9b97;
-  background: rgba(255, 80, 80, 0.18);
+  color: var(--danger);
+  background: rgba(255, 80, 80, 0.16);
+}
+.pill-btn.danger:hover {
+  background: rgba(255, 80, 80, 0.26);
 }
 
+/* Round icon button — header gear, back chevron. Houses a 14–15px SVG. */
 .gear-btn {
   font-family: inherit;
-  width: 24px;
-  height: 24px;
+  width: 25px;
+  height: 25px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.62);
   background: var(--fill);
   border: none;
   border-radius: 50%;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
 }
 .gear-btn:hover {
   background: var(--fill-2);
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.92);
+}
+.gear-btn:active {
+  transform: scale(0.92);
 }
 
 .btn {
@@ -422,29 +495,41 @@ body,
   color: var(--text);
   background: var(--fill);
   border: 1px solid var(--hair);
-  border-radius: 8px;
-  padding: 6px 12px;
+  border-radius: 9px;
+  padding: 6px 13px;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
 }
 .btn:hover {
   background: var(--fill-2);
+  border-color: var(--hair-strong);
+}
+.btn:active {
+  transform: scale(0.97);
 }
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
+  transform: none;
 }
 .btn.accent {
-  background: rgba(255, 157, 61, 0.9);
+  background: linear-gradient(180deg, #ffb061, var(--accent));
   border-color: transparent;
-  color: #1c1205;
+  color: #2a1803;
+  box-shadow: 0 2px 8px rgba(255, 157, 61, 0.28);
 }
 .btn.accent:hover {
-  background: var(--accent);
+  filter: brightness(1.06);
 }
 .btn.primary {
-  background: rgba(110, 123, 255, 0.85);
+  background: linear-gradient(180deg, #8089ff, #6e7bff);
   border-color: transparent;
   color: #0d1030;
+  box-shadow: 0 2px 8px rgba(110, 123, 255, 0.26);
+}
+.btn.primary:hover {
+  filter: brightness(1.06);
 }
 
 /* ---- Usage badge + brake ------------------------------------------------- */
@@ -456,23 +541,32 @@ body,
   font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   font-size: 10px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.75);
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.78);
   background: var(--fill);
-  border: none;
+  border: 1px solid var(--hair);
   border-radius: 999px;
-  padding: 3px 8px;
+  padding: 3px 9px;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.usage-badge:hover {
+  background: var(--fill-2);
+  border-color: var(--hair-strong);
 }
 /* Chip background follows the hottest segment; per-segment text color is set
    by .usage-seg below so each agent reads its own level. */
 .usage-badge.warn {
-  background: rgba(255, 178, 61, 0.18);
+  background: rgba(255, 178, 61, 0.16);
+  border-color: rgba(255, 178, 61, 0.28);
 }
 .usage-badge.braked {
-  background: rgba(255, 157, 61, 0.24);
+  background: rgba(255, 157, 61, 0.22);
+  border-color: rgba(255, 157, 61, 0.38);
 }
 .usage-seg.lvl-0 {
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.78);
 }
 .usage-seg.lvl-1 {
   color: var(--waiting);
@@ -481,35 +575,42 @@ body,
   color: var(--accent);
 }
 .usage-sep {
-  color: rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.28);
 }
 
 .brake-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
-  margin-bottom: 6px;
-  border-radius: 9px;
-  background: rgba(255, 157, 61, 0.1);
-  border: 1px solid rgba(255, 157, 61, 0.22);
+  gap: 9px;
+  padding: 9px 11px;
+  margin-bottom: 7px;
+  border-radius: 10px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 157, 61, 0.13),
+    rgba(255, 157, 61, 0.07)
+  );
+  border: 1px solid rgba(255, 157, 61, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .brake-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 7px rgba(255, 157, 61, 0.7);
   flex: none;
 }
 .brake-title {
   font-size: 12px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.88);
+  font-weight: 550;
+  color: rgba(255, 255, 255, 0.9);
 }
 .brake-sub {
   font-family: ui-monospace, monospace;
   font-size: 10px;
-  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
 }
 
 /* ---- Session list -------------------------------------------------------- */
@@ -527,12 +628,16 @@ body,
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 8px 8px;
-  border-radius: 9px;
+  padding: 8px;
+  border-radius: 10px;
   cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
 }
 .session-row:hover {
   background: var(--fill);
+  border-color: var(--hair);
 }
 .session-row.ended {
   opacity: 0.5;
@@ -550,7 +655,8 @@ body,
 
 .session-project {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 550;
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -564,7 +670,7 @@ body,
   font-weight: 700;
   letter-spacing: 0.5px;
   padding: 2px 5px;
-  border-radius: 999px;
+  border-radius: 5px;
   flex: none;
   line-height: 1;
 }
@@ -581,37 +687,57 @@ body,
 .session-cost {
   font-family: ui-monospace, monospace;
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-3);
   flex: none;
 }
 
+/* Round icon button inside a session row (focus / end / remove). The non-urgent
+   ones rest hidden and reveal on row hover so the list stays calm; the
+   waiting-jump (.warn) is a live call to action and stays visible. */
 .row-btn {
   font-family: inherit;
-  width: 22px;
-  height: 22px;
+  width: 23px;
+  height: 23px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  line-height: 1;
   color: rgba(255, 255, 255, 0.6);
   background: var(--fill);
   border: none;
   border-radius: 50%;
   cursor: pointer;
+  opacity: 0;
+  transition: background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+.session-row:hover .row-btn,
+.session-row:focus-within .row-btn {
+  opacity: 1;
 }
 .row-btn:hover {
   background: var(--fill-2);
+  color: rgba(255, 255, 255, 0.92);
+}
+.row-btn:active {
+  transform: scale(0.9);
 }
 .row-btn.warn {
+  opacity: 1;
   color: var(--waiting);
-  background: rgba(255, 178, 61, 0.18);
+  background: rgba(255, 178, 61, 0.16);
+}
+.row-btn.warn:hover {
+  background: rgba(255, 178, 61, 0.28);
 }
 .row-btn.danger {
-  color: #ff9b97;
-  background: rgba(255, 80, 80, 0.18);
-  font-size: 9px;
+  color: var(--danger);
+  background: rgba(255, 80, 80, 0.15);
+}
+.row-btn.danger:hover {
+  background: rgba(255, 80, 80, 0.26);
 }
 
 /* ---- Empty / install states --------------------------------------------- */
@@ -621,17 +747,18 @@ body,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 28px 20px;
+  gap: 9px;
+  padding: 30px 20px;
   text-align: center;
 }
 .empty-glyph {
-  font-size: 28px;
-  color: rgba(255, 255, 255, 0.22);
+  display: inline-flex;
+  color: rgba(255, 255, 255, 0.24);
   line-height: 1;
 }
 .empty-glyph.warn {
-  color: rgba(255, 178, 61, 0.7);
+  color: rgba(255, 178, 61, 0.75);
+  filter: drop-shadow(0 0 8px rgba(255, 178, 61, 0.3));
 }
 .empty-title {
   font-size: 13px;
@@ -640,14 +767,16 @@ body,
 }
 .empty-text {
   font-size: 12px;
+  line-height: 1.5;
   color: var(--text-2);
+  max-width: 240px;
 }
 .empty-text.small {
   font-size: 11px;
   padding: 6px 2px;
 }
 .empty-state.install .btn {
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
 /* ---- Detail -------------------------------------------------------------- */
@@ -661,13 +790,21 @@ body,
 
 .detail-stats {
   display: flex;
-  gap: 12px;
+  gap: 8px;
+  align-items: center;
   font-family: ui-monospace, monospace;
-  font-size: 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-2);
+}
+.detail-stats > span {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--fill);
 }
 .stat-status {
   text-transform: capitalize;
+  font-weight: 600;
 }
 .status-text-working {
   color: var(--accent);
@@ -682,12 +819,12 @@ body,
 .detail-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 .section-label {
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   color: var(--text-3);
   font-weight: 600;
 }
@@ -698,16 +835,26 @@ body,
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 .action-list li {
   display: flex;
-  gap: 7px;
+  gap: 8px;
   font-size: 12px;
+  align-items: baseline;
+}
+.action-list li::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+  transform: translateY(-2px);
 }
 .action-tool {
-  color: #cfd0d4;
-  font-weight: 500;
+  color: #d4d5d9;
+  font-weight: 550;
 }
 .action-detail {
   color: var(--text-3);
@@ -719,19 +866,21 @@ body,
 .msg {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 9px 10px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
+  gap: 4px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 .msg-user {
-  background: rgba(139, 147, 255, 0.08);
+  background: rgba(139, 147, 255, 0.1);
+  border-color: rgba(139, 147, 255, 0.16);
 }
 .msg-role {
   font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-weight: 700;
   color: var(--text-3);
 }
 .msg-user .msg-role {
@@ -745,7 +894,7 @@ body,
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: #d8d8dc;
   word-break: break-word;
   min-width: 0;
@@ -777,10 +926,11 @@ body,
 }
 .md-pre {
   margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.8);
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.82);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
   overflow-x: auto;
@@ -789,9 +939,9 @@ body,
 .md-code-inline {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.07);
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
 }
 .md a {
   color: var(--user);
@@ -810,30 +960,32 @@ body,
 .set-scroll {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   padding: 14px;
 }
 
 .set-section {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 .set-section-title {
   font-size: 9px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.09em;
+  color: rgba(255, 255, 255, 0.42);
+  padding-left: 2px;
 }
 .set-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  gap: 13px;
+  padding: 13px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 var(--highlight);
 }
 
 .set-row {
@@ -844,14 +996,15 @@ body,
 .set-label {
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.86);
   flex: 1;
   min-width: 0;
 }
 .set-value {
   font-family: ui-monospace, monospace;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.86);
 }
 /* Dimmer, indented label for the budget/cap row beneath each agent's plan. */
 .set-sublabel {
@@ -866,29 +1019,33 @@ body,
 .agent-plan {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
 .set-stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
 .set-help,
 .set-note {
   font-size: 10px;
-  line-height: 1.5;
+  line-height: 1.55;
   color: var(--text-2);
 }
 .set-note {
   display: flex;
-  gap: 6px;
-  padding: 8px;
-  border-radius: 7px;
+  gap: 7px;
+  padding: 9px 10px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.05);
   color: var(--text-3);
 }
 .note-icon {
+  display: inline-flex;
   flex: none;
+  color: var(--text-2);
+  transform: translateY(1px);
 }
 
 .select {
@@ -902,10 +1059,16 @@ body,
   color: var(--text);
   background: var(--fill);
   border: 1px solid var(--hair);
-  border-radius: 7px;
-  padding: 4px 8px;
+  border-radius: 8px;
+  padding: 5px 9px;
   max-width: 190px;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.select:hover:not(:disabled) {
+  background: var(--fill-2);
+  border-color: var(--hair-strong);
 }
 .select option {
   /* The popup can't do translucency; pin a solid dark surface so options stay
@@ -922,7 +1085,8 @@ body,
   align-items: center;
   gap: 2px;
   background: var(--fill);
-  border-radius: 8px;
+  border: 1px solid var(--hair);
+  border-radius: 9px;
   padding: 2px;
 }
 .stepper button {
@@ -935,6 +1099,7 @@ body,
   font-size: 14px;
   border-radius: 6px;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
 }
 .stepper button:hover {
   background: var(--fill-2);
@@ -946,7 +1111,8 @@ body,
 .stepper-val {
   font-family: ui-monospace, monospace;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.88);
   min-width: 52px;
   text-align: center;
 }
@@ -963,11 +1129,17 @@ body,
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: var(--accent);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   cursor: pointer;
+  transition: transform var(--t-fast) var(--ease);
+}
+.slider::-webkit-slider-thumb:active {
+  transform: scale(1.15);
 }
 .slider:disabled {
   opacity: 0.5;
@@ -982,11 +1154,12 @@ body,
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--t-med) var(--ease);
   padding: 0;
 }
 .toggle.on {
   background: var(--accent);
+  box-shadow: 0 0 10px rgba(255, 157, 61, 0.35);
 }
 .toggle:disabled {
   opacity: 0.5;
@@ -1000,15 +1173,19 @@ body,
   height: 18px;
   border-radius: 50%;
   background: #fff;
-  transition: transform 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform var(--t-med) var(--spring);
 }
 .toggle.on .toggle-knob {
   transform: translateX(16px);
 }
 
 .status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 550;
 }
 .status-chip.ok {
   color: var(--done);
@@ -1024,7 +1201,7 @@ body,
 .set-error {
   font-family: ui-monospace, monospace;
   font-size: 10px;
-  color: #ff9b97;
+  color: var(--danger);
   word-break: break-word;
 }
 
@@ -1050,6 +1227,7 @@ body,
 .about-ver {
   font-family: ui-monospace, monospace;
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-3);
 }
 
@@ -1062,4 +1240,24 @@ body,
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
+}
+.sheet-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: padding-box;
+}
+
+/* Respect the OS "reduce motion" setting — kill the looping/entrance motion but
+   keep state-change transitions, which convey meaning rather than decorate. */
+@media (prefers-reduced-motion: reduce) {
+  .sheet {
+    animation: none;
+  }
+  .glyph-pulse,
+  .glyph-waiting,
+  .glyph-check,
+  .glyph-mascot,
+  .mascot-foot.a,
+  .mascot-foot.b {
+    animation: none;
+  }
 }

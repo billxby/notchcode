@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import type { Agent, Status, WorkingAnimation } from "./types";
 import { AGENT_ACCENT } from "./types";
+import { IconCheck, IconBang } from "./Icons";
 
 // ---- Working animations -----------------------------------------------------
 
@@ -99,10 +100,18 @@ export function StatusIndicator({
         );
       break;
     case "waiting":
-      inner = <span className="glyph-waiting">!</span>;
+      inner = (
+        <span className="glyph-waiting">
+          <IconBang size={13} />
+        </span>
+      );
       break;
     case "done":
-      inner = <span className="glyph-check">✓</span>;
+      inner = (
+        <span className="glyph-check">
+          <IconCheck size={13} />
+        </span>
+      );
       break;
     case "idle":
     default:
