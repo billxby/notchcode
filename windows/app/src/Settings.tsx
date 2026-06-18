@@ -28,6 +28,9 @@ import {
 
 const GITHUB_URL = "https://github.com/billxby/notchcode";
 
+/** One connected monitor, mirrored from the Rust `list_monitors` command. */
+type MonitorInfo = { name: string; label: string; primary: boolean; current: boolean };
+
 /** 1M steps below 10M, 5M above — usable across the whole free→Max 20× range. */
 function budgetStep(current: number): number {
   return current < 10_000_000 ? 1_000_000 : 5_000_000;
@@ -94,6 +97,8 @@ export default function SettingsView({
   // Launch-at-login (owned by the system; re-read after every toggle).
   const [autostart, setAutostart] = useState(false);
   const [version, setVersion] = useState("");
+  // Connected monitors for the Display picker (multi-monitor docking).
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
 
   async function refreshInstalled(agent: Agent) {
     try {
@@ -108,7 +113,17 @@ export default function SettingsView({
     (["claude", "codex"] as Agent[]).forEach(refreshInstalled);
     invoke<boolean>("autostart_enabled").then(setAutostart).catch(() => {});
     getVersion().then(setVersion).catch(() => {});
+    invoke<MonitorInfo[]>("list_monitors").then(setMonitors).catch(() => {});
   }, []);
+
+  async function pickMonitor(name: string) {
+    try {
+      await invoke("dock_to_monitor", { name });
+      setMonitors(await invoke<MonitorInfo[]>("list_monitors"));
+    } catch {
+      /* leave prior selection */
+    }
+  }
 
   async function runInstall(agent: Agent) {
     setHookBusy(agent);
@@ -358,6 +373,27 @@ export default function SettingsView({
             How the notch shows that Claude is working. Spinner cycles the CLI
             dingbats; pulse breathes the chat-logo star; mascot walks in place.
           </div>
+          {monitors.length > 1 && (
+            <>
+              <div className="set-row">
+                <span className="set-label">Display</span>
+                <select
+                  className="select"
+                  value={monitors.find((m) => m.current)?.name ?? ""}
+                  onChange={(e) => pickMonitor(e.target.value)}
+                >
+                  {monitors.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="set-help">
+                Which monitor the notch docks to. You can also drag it across.
+              </div>
+            </>
+          )}
         </Section>
 
         {/* Integration — one independent install row per agent */}

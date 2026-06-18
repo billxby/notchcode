@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  availableMonitors,
   currentMonitor,
   getCurrentWindow,
   LogicalPosition,
@@ -83,10 +84,19 @@ type DragState = {
   startSY: number;
   startWX: number;
   startWY: number;
+  /** The monitor the drag started on (logical px) — snap fallback. */
   monLeft: number;
   monWidth: number;
   monTop: number;
   monHeight: number;
+  /** Every connected monitor in logical px (window scale), so the drag can
+      travel onto any of them and a release can dock to the one it lands on. */
+  monitors: { name: string | null; left: number; top: number; width: number; height: number }[];
+  /** Union rect of all monitors (logical px) — the drag travel bounds. */
+  uLeft: number;
+  uTop: number;
+  uRight: number;
+  uBottom: number;
   /** Current window size (logical px) for clamping/snapping — the pill and
       the expanded sheet windows differ, so it's read live at drag start. */
   winW: number;
@@ -698,6 +708,11 @@ function App() {
       monWidth: window.screen.width,
       monTop: 0,
       monHeight: window.screen.height,
+      monitors: [],
+      uLeft: 0,
+      uTop: 0,
+      uRight: window.screen.width,
+      uBottom: window.screen.height,
       winW: PILL_WINDOW_WIDTH,
       winH: PILL_WINDOW_HEIGHT,
       moved: false,
@@ -710,7 +725,8 @@ function App() {
       wnd.outerPosition(),
       currentMonitor(),
       wnd.outerSize(),
-    ]).then(([scale, pos, mon, size]) => {
+      availableMonitors(),
+    ]).then(([scale, pos, mon, size, monitors]) => {
       const d = drag.current;
       if (!d) return;
       d.startWX = pos.x / scale;
@@ -722,6 +738,24 @@ function App() {
         d.monWidth = mon.size.width / scale;
         d.monTop = mon.position.y / scale;
         d.monHeight = mon.size.height / scale;
+      }
+      // All monitors in one logical coordinate space (window scale), so the
+      // pill can be dragged across the seam between displays and the union
+      // becomes the travel bounds — previously the clamp was the single
+      // start-monitor, so the pill could never reach a second monitor.
+      const rects = (monitors ?? []).map((m) => ({
+        name: m.name ?? null,
+        left: m.position.x / scale,
+        top: m.position.y / scale,
+        width: m.size.width / scale,
+        height: m.size.height / scale,
+      }));
+      if (rects.length) {
+        d.monitors = rects;
+        d.uLeft = Math.min(...rects.map((r) => r.left));
+        d.uTop = Math.min(...rects.map((r) => r.top));
+        d.uRight = Math.max(...rects.map((r) => r.left + r.width));
+        d.uBottom = Math.max(...rects.map((r) => r.top + r.height));
       }
       d.ready = true;
     });
@@ -740,8 +774,8 @@ function App() {
     }
     if (!d.moved || !d.ready) return;
 
-    const nx = clamp(d.startWX + dx, d.monLeft, d.monLeft + d.monWidth - d.winW);
-    const ny = clamp(d.startWY + dy, d.monTop, d.monTop + d.monHeight - d.winH);
+    const nx = clamp(d.startWX + dx, d.uLeft, d.uRight - d.winW);
+    const ny = clamp(d.startWY + dy, d.uTop, d.uBottom - d.winH);
     getCurrentWindow().setPosition(new LogicalPosition(Math.round(nx), Math.round(ny)));
   }
 
@@ -763,24 +797,43 @@ function App() {
     suppressClick.current = true;
 
     const wnd = getCurrentWindow();
-    Promise.all([wnd.scaleFactor(), wnd.outerPosition()]).then(async ([scale, pos]) => {
-      let xL = pos.x / scale;
-      let yL = pos.y / scale;
-      const shouldDock = yL <= d.monTop + SNAP_Y;
+    Promise.all([wnd.scaleFactor(), wnd.outerPosition()]).then(([scale, pos]) => {
+      const xL = pos.x / scale;
+      const yL = pos.y / scale;
+      // Which monitor is the pill's center over? Dock to that one's top edge —
+      // not the drag-start monitor — so dropping near the top of monitor 2 docks
+      // there. Fall back to the start monitor if the lookup misses.
+      const cx = xL + d.winW / 2;
+      const cy = yL + d.winH / 2;
+      const host =
+        d.monitors.find(
+          (r) => cx >= r.left && cx < r.left + r.width && cy >= r.top && cy < r.top + r.height
+        ) ?? {
+          name: null,
+          left: d.monLeft,
+          top: d.monTop,
+          width: d.monWidth,
+          height: d.monHeight,
+        };
+      const shouldDock = yL <= host.top + SNAP_Y;
       if (shouldDock) {
-        xL = d.monLeft + (d.monWidth - d.winW) / 2;
-        yL = d.monTop;
-        await wnd.setPosition(new LogicalPosition(Math.round(xL), Math.round(yL)));
+        updateDocked(true);
+        // Hand placement + persistence to Rust: it centers on the chosen monitor
+        // in physical px (DPI-correct) and remembers it, so the watch loop keeps
+        // the notch on that display instead of yanking it to the primary.
+        invoke("dock_to_monitor", { name: host.name ?? "" });
+      } else {
+        updateDocked(false);
+        invoke("set_docked", { docked: false });
+        // Persist the pill-equivalent top-left (the windows share a center axis)
+        // plus the monitor it floated over, so it reopens where expected.
+        invoke("save_overlay_pos", {
+          x: Math.round(xL + (d.winW - PILL_WINDOW_WIDTH) / 2),
+          y: Math.round(yL),
+          docked: false,
+          monitor: host.name ?? null,
+        });
       }
-      updateDocked(shouldDock);
-      invoke("set_docked", { docked: shouldDock });
-      // Persist the pill-equivalent top-left (the windows share a center
-      // axis), so restarting restores the blob where the user expects it.
-      invoke("save_overlay_pos", {
-        x: Math.round(xL + (d.winW - PILL_WINDOW_WIDTH) / 2),
-        y: Math.round(yL),
-        docked: shouldDock,
-      });
     });
   }
 

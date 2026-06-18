@@ -127,17 +127,19 @@ fn decode_line(line: &[u8], result: &mut ParseResult) {
     if parsed.kind.as_deref() == Some("assistant") {
         if let Some(msg) = &parsed.message {
             if let Some(w) = &msg.usage {
-                let cache5m = w
-                    .cache_creation
-                    .as_ref()
-                    .and_then(|c| c.ephemeral_5m_input_tokens)
-                    .or(w.cache_creation_input_tokens)
-                    .unwrap_or(0);
-                let cache1h = w
-                    .cache_creation
-                    .as_ref()
-                    .and_then(|c| c.ephemeral_1h_input_tokens)
-                    .unwrap_or(0);
+                // `cache_creation_input_tokens` is the *total* of all cache-write
+                // lanes. Only fall back to it when the per-lane `cache_creation`
+                // object is absent; when the object is present, read 5m/1h
+                // strictly from it (missing lane = 0). Mixing the total into one
+                // lane while also reading the other from the object double-counts
+                // the tokens that appear in both.
+                let (cache5m, cache1h) = match &w.cache_creation {
+                    Some(c) => (
+                        c.ephemeral_5m_input_tokens.unwrap_or(0),
+                        c.ephemeral_1h_input_tokens.unwrap_or(0),
+                    ),
+                    None => (w.cache_creation_input_tokens.unwrap_or(0), 0),
+                };
                 let usage = Usage {
                     input_tokens: w.input_tokens.unwrap_or(0),
                     output_tokens: w.output_tokens.unwrap_or(0),
@@ -206,4 +208,35 @@ fn extract_tag(text: &str, tag: &str) -> Option<String> {
     let start = text.find(&open)? + open.len();
     let end = text[start..].find(&close)? + start;
     Some(text[start..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn billable(line: &str) -> u64 {
+        let mut r = ParseResult::default();
+        decode_line(line.as_bytes(), &mut r);
+        r.usages.iter().map(|(u, _)| u.billable_tokens()).sum()
+    }
+
+    #[test]
+    fn cache_object_with_only_1h_is_not_double_counted() {
+        // Object carries only the 1h lane; the top-level total mirrors it. Old
+        // code summed both → 215; correct is input10 + output5 + 1h100 = 115.
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":100}}}}"#;
+        assert_eq!(billable(line), 115);
+    }
+
+    #[test]
+    fn top_level_total_used_only_when_object_absent() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100}}}"#;
+        assert_eq!(billable(line), 115); // 10 + 5 + 100 (fallback into 5m lane)
+    }
+
+    #[test]
+    fn both_lanes_from_object_ignore_top_level_total() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":100}}}}"#;
+        assert_eq!(billable(line), 300); // 200 + 100, NOT + 300
+    }
 }

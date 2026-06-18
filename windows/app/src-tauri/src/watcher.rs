@@ -48,6 +48,11 @@ struct AgentUsage {
     weekly_dollars: f64,
     today_tokens: u64,
     dollars_today: f64,
+    /// Real rolling-window usage the frontend shows directly (Anthropic/OpenAI
+    /// don't publish the actual token limits, so these true windows are metered
+    /// against the user's own configured weekly target rather than a guess).
+    tokens_5h: u64,
+    tokens_7d: u64,
 }
 
 /// What the frontend gets on every change: pill status + detail, the session
@@ -96,8 +101,27 @@ fn run(app: AppHandle, engine: SharedEngine) {
         }
     };
 
-    // Watch whichever agents' transcript dirs exist. A user may have only one
-    // agent installed; the other dir simply isn't watched.
+    let mut offsets: HashMap<PathBuf, u64> = HashMap::new();
+
+    // Boot scan for each agent BEFORE we start watching. Catch-up reads each
+    // transcript directly and seeds its per-file cursor to EOF; if we started
+    // the watcher first, a write that landed during the scan would be counted
+    // once by catch-up and then a *second* time by the FS event queued for it.
+    // Scanning before `watch()` closes that window — the live watcher only ever
+    // sees bytes written strictly after the cursor catch-up left.
+    if let Some(dir) = &claude_dir {
+        if dir.exists() {
+            catch_up_claude(dir, &engine, &mut offsets);
+        }
+    }
+    if let Some(dir) = &codex_dir {
+        if dir.exists() {
+            catch_up_codex(dir, &engine, &mut offsets);
+        }
+    }
+
+    // Now start watching for live changes. A user may have only one agent
+    // installed; the other dir simply isn't watched.
     for (label, dir) in [("Claude", &claude_dir), ("Codex", &codex_dir)] {
         if let Some(dir) = dir {
             if dir.exists() {
@@ -117,22 +141,6 @@ fn run(app: AppHandle, engine: SharedEngine) {
     }
 
     hooks::start(tx);
-
-    let mut offsets: HashMap<PathBuf, u64> = HashMap::new();
-
-    // Boot scan for each agent: surface pre-launch usage and currently-idle
-    // sessions before the first live event arrives. Offset-guarded so the live
-    // watcher resumes without re-counting.
-    if let Some(dir) = &claude_dir {
-        if dir.exists() {
-            catch_up_claude(dir, &engine, &mut offsets);
-        }
-    }
-    if let Some(dir) = &codex_dir {
-        if dir.exists() {
-            catch_up_codex(dir, &engine, &mut offsets);
-        }
-    }
 
     // Keep the watcher alive for the lifetime of the loop.
     let _watcher = watcher;
@@ -208,6 +216,8 @@ fn run_loop(
                             weekly_dollars: e.weekly_dollars(a),
                             today_tokens: e.today_tokens(a),
                             dollars_today: e.dollars_today(a),
+                            tokens_5h: e.tokens_5h(a),
+                            tokens_7d: e.tokens_7d(a),
                         },
                     )
                 })
