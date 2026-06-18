@@ -13,14 +13,18 @@ import { IconCheck, IconBang } from "./Icons";
 // ---- Working animations -----------------------------------------------------
 
 /** The Claude Code CLI's cycling dingbat "flower" — six frames at ~80ms. */
+const SPINNER_FRAMES = ["✦", "✱", "✶", "✷", "✸", "✺"];
+
 function ClaudeSpinner() {
-  const frames = ["✦", "✱", "✶", "✷", "✸", "✺"];
   const [i, setI] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setI((n) => (n + 1) % frames.length), 80);
+    // Module-scope frames: the once-mounted interval closes over a stable array
+    // (a per-render literal would be a latent stale-closure footgun) and there's
+    // no per-render allocation.
+    const id = setInterval(() => setI((n) => (n + 1) % SPINNER_FRAMES.length), 80);
     return () => clearInterval(id);
   }, []);
-  return <span className="glyph-spinner">{frames[i]}</span>;
+  return <span className="glyph-spinner">{SPINNER_FRAMES[i]}</span>;
 }
 
 /** A single 8-point star breathing — the claude.ai logo pulse, transposed. */

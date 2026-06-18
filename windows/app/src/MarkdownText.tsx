@@ -130,43 +130,54 @@ const INLINE_RE =
 
 const LINK_RE = /^\[([^\]]+)\]\(([^)]+)\)$/;
 
-function renderInline(s: string, key = 0): ReactNode {
-  const m = INLINE_RE.exec(s);
-  if (!m) return s;
+function renderInline(s: string): ReactNode {
+  // Walk the string one inline match at a time. Iterative on the remainder (not
+  // tail-recursive on `after`) so a paragraph with hundreds of inline spans
+  // can't recurse hundreds deep and blow the stack. Nested emphasis/link text
+  // still recurses, but only by real markup nesting depth (shallow), never by
+  // the number of sibling tokens.
+  const out: ReactNode[] = [];
+  let rest = s;
+  let key = 0;
 
-  const before = s.slice(0, m.index);
-  const after = s.slice(m.index + m[0].length);
-  let node: ReactNode;
+  while (rest.length > 0) {
+    const m = INLINE_RE.exec(rest);
+    if (!m) {
+      out.push(<Fragment key={key++}>{rest}</Fragment>);
+      break;
+    }
 
-  if (m[1]) {
-    node = <code className="md-code-inline">{m[1].slice(1, -1)}</code>;
-  } else if (m[2]) {
-    const link = LINK_RE.exec(m[2])!;
-    const href = link[2];
-    node = (
-      <a
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          openUrl(href);
-        }}
-      >
-        {renderInline(link[1])}
-      </a>
-    );
-  } else if (m[3]) {
-    node = <strong>{renderInline(m[3].slice(2, -2))}</strong>;
-  } else {
-    node = <em>{renderInline(m[4].slice(1, -1))}</em>;
+    const before = rest.slice(0, m.index);
+    if (before) out.push(<Fragment key={key++}>{before}</Fragment>);
+
+    let node: ReactNode;
+    if (m[1]) {
+      node = <code className="md-code-inline">{m[1].slice(1, -1)}</code>;
+    } else if (m[2]) {
+      const link = LINK_RE.exec(m[2])!;
+      const href = link[2];
+      node = (
+        <a
+          href={href}
+          onClick={(e) => {
+            e.preventDefault();
+            openUrl(href);
+          }}
+        >
+          {renderInline(link[1])}
+        </a>
+      );
+    } else if (m[3]) {
+      node = <strong>{renderInline(m[3].slice(2, -2))}</strong>;
+    } else {
+      node = <em>{renderInline(m[4].slice(1, -1))}</em>;
+    }
+    out.push(<Fragment key={key++}>{node}</Fragment>);
+
+    rest = rest.slice(m.index + m[0].length);
   }
 
-  return (
-    <Fragment key={key}>
-      {before}
-      {node}
-      {renderInline(after, key + 1)}
-    </Fragment>
-  );
+  return <>{out}</>;
 }
 
 // ---- Component -----------------------------------------------------------------
