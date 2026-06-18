@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -154,12 +154,24 @@ pub fn forward(agent: Agent, event: &str) {
     // shim sent via $PPID, now resolved natively against this agent's process.
     let pid = winutil::resolve_session_pid(agent.process_name());
 
+    // One wall-clock budget for the *entire* exchange. Each of connect/write/read
+    // used to carry its own independent 1s timeout, so a half-open server could
+    // stack them to ~3s of latency on every hook the agent fires. A single
+    // deadline caps the whole thing at ~1s no matter where it stalls.
+    const BUDGET: Duration = Duration::from_secs(1);
+    let deadline = Instant::now() + BUDGET;
+    let remaining = || {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1))
+    };
+
     let addr = SocketAddr::from(([127, 0, 0, 1], HOOK_PORT));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, BUDGET) else {
         return; // app not running / port closed — fire-and-forget, exit clean.
     };
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(remaining()));
+    let _ = stream.set_read_timeout(Some(remaining()));
 
     let segment = agent.segment();
     let mut req = format!(
@@ -177,7 +189,9 @@ pub fn forward(agent: Agent, event: &str) {
     let _ = stream.write_all(&packet);
     let _ = stream.flush();
     // Best-effort drain of the response so the server's write doesn't race a
-    // RST on close; we don't care about the contents.
+    // RST on close; we don't care about the contents. Bounded by the remaining
+    // budget, so a server that accepts then stalls can't hold us past `deadline`.
+    let _ = stream.set_read_timeout(Some(remaining()));
     let mut sink = [0u8; 64];
     let _ = stream.read(&mut sink);
 }
@@ -204,6 +218,9 @@ pub fn start(tx: Sender<Msg>) {
 
 fn handle_connection(mut stream: TcpStream, tx: Sender<Msg>) {
     let _ = stream.set_read_timeout(Some(CONN_TIMEOUT));
+    // Also bound writes: a local client that fills its receive window and stops
+    // reading must not wedge this connection thread forever in `respond`.
+    let _ = stream.set_write_timeout(Some(CONN_TIMEOUT));
 
     // Read until we have the full header block (or give up).
     let mut buf = Vec::new();
