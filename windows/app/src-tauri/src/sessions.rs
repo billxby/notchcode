@@ -29,6 +29,13 @@ const WORKING_WINDOW: Duration = Duration::from_secs(4);
 const STALE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Forget sessions untouched this long.
 const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// Absolute ceiling for a *Done* session that has no live process. Done is
+/// normally sticky (it survives timeouts so the checkmark persists until the
+/// user acknowledges it), but a file-only Done session has no PID to
+/// crash-detect and may never be acknowledged — without a ceiling it would live
+/// in the map forever (unbounded growth). 6h is far longer than any real
+/// "did you notice it finished" window.
+const DONE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Rolling usage window (7 days), in seconds.
 const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Per-session caps (mirror the Mac limits).
@@ -669,7 +676,16 @@ impl SessionEngine {
         // outlive every timeout until the user acknowledges it or the Claude
         // process dies (crash_check). TTL only forgets non-done sessions.
         self.sessions.retain(|_, s| {
-            s.status == Status::Done || now.duration_since(s.last_update) < SESSION_TTL
+            if s.status == Status::Done {
+                // Sticky, but not forever: a Done session with a live process
+                // stays until the PID dies or the user acknowledges it; a
+                // file-only Done session (no PID) is forgotten once it's been
+                // sitting well past the normal TTL, so the map can't grow without
+                // bound from many short transcript-only sessions.
+                s.claude_pid.is_some() || now.duration_since(s.last_update) < DONE_TTL
+            } else {
+                now.duration_since(s.last_update) < SESSION_TTL
+            }
         });
 
         // Age out usage ticks past the 7-day window, decrementing the totals.
