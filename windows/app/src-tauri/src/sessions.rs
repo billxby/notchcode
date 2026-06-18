@@ -38,6 +38,9 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 const DONE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Rolling usage window (7 days), in seconds.
 const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Rolling usage window (5 hours) — the shorter of the two rate-limit windows
+/// the badge surfaces alongside the weekly figure.
+const FIVE_HOURS: Duration = Duration::from_secs(5 * 60 * 60);
 /// Per-session caps (mirror the Mac limits).
 const ACTION_LIMIT: usize = 5;
 const MESSAGE_LIMIT: usize = 200;
@@ -183,19 +186,17 @@ struct UsageTick {
     at: SystemTime,
 }
 
-/// True if `t` falls on the current local calendar day.
-fn is_today(t: SystemTime) -> bool {
+/// True if `t` falls on `day` (a local calendar date). The caller computes
+/// `Local::now().date_naive()` once and passes it in, so a sum over many ticks
+/// does one `now` lookup instead of one per element.
+fn on_local_day(t: SystemTime, day: chrono::NaiveDate) -> bool {
     let dt: DateTime<Local> = t.into();
-    dt.date_naive() == Local::now().date_naive()
+    dt.date_naive() == day
 }
 
 pub struct SessionEngine {
     sessions: HashMap<String, Session>,
     usage: Vec<UsageTick>,
-    /// Running per-agent 7-day totals (kept as counters so state builds don't
-    /// re-sum a week of ticks); decremented in `prune` as ticks age out.
-    weekly_tokens: HashMap<Agent, u64>,
-    weekly_dollars: HashMap<Agent, f64>,
 }
 
 impl SessionEngine {
@@ -203,8 +204,6 @@ impl SessionEngine {
         Self {
             sessions: HashMap::new(),
             usage: Vec::new(),
-            weekly_tokens: HashMap::new(),
-            weekly_dollars: HashMap::new(),
         }
     }
 
@@ -325,8 +324,6 @@ impl SessionEngine {
             usd,
             at: SystemTime::now(),
         });
-        *self.weekly_tokens.entry(agent).or_insert(0) += tokens;
-        *self.weekly_dollars.entry(agent).or_insert(0.0) += usd;
 
         let key = agent.session_key(session_id);
         let entry = self
@@ -436,8 +433,6 @@ impl SessionEngine {
                 usd,
                 at: mtime,
             });
-            *self.weekly_tokens.entry(agent).or_insert(0) += tokens;
-            *self.weekly_dollars.entry(agent).or_insert(0.0) += usd;
             row_usd += usd;
         }
 
@@ -597,20 +592,56 @@ impl SessionEngine {
             .and_then(|s| s.detail.clone())
     }
 
+    /// Tokens for `agent` whose tick falls within `window` of now. Summed from
+    /// the (already 7-day-pruned) `usage` ticks on read — there's no separate
+    /// running counter to drift out of sync with the ticks. A tick stamped in
+    /// the future (clock moved back) is treated as in-window.
+    fn tokens_in_window(&self, agent: Agent, window: Duration) -> u64 {
+        let now = SystemTime::now();
+        self.usage
+            .iter()
+            .filter(|t| t.agent == agent)
+            .filter(|t| now.duration_since(t.at).map(|d| d < window).unwrap_or(true))
+            .map(|t| t.tokens)
+            .sum()
+    }
+
+    /// USD counterpart of `tokens_in_window`.
+    fn usd_in_window(&self, agent: Agent, window: Duration) -> f64 {
+        let now = SystemTime::now();
+        self.usage
+            .iter()
+            .filter(|t| t.agent == agent)
+            .filter(|t| now.duration_since(t.at).map(|d| d < window).unwrap_or(true))
+            .map(|t| t.usd)
+            .sum()
+    }
+
+    /// Tokens in the rolling 5-hour window for `agent`.
+    pub fn tokens_5h(&self, agent: Agent) -> u64 {
+        self.tokens_in_window(agent, FIVE_HOURS)
+    }
+
+    /// Tokens in the rolling 7-day window for `agent`.
+    pub fn tokens_7d(&self, agent: Agent) -> u64 {
+        self.tokens_in_window(agent, WEEK)
+    }
+
     pub fn weekly_tokens(&self, agent: Agent) -> u64 {
-        self.weekly_tokens.get(&agent).copied().unwrap_or(0)
+        self.tokens_in_window(agent, WEEK)
     }
 
     pub fn weekly_dollars(&self, agent: Agent) -> f64 {
-        self.weekly_dollars.get(&agent).copied().unwrap_or(0.0)
+        self.usd_in_window(agent, WEEK)
     }
 
     /// Tokens observed today (local calendar day) for `agent`. Scales the
     /// brake/today figures with today's activity, not the whole week.
     pub fn today_tokens(&self, agent: Agent) -> u64 {
+        let today = Local::now().date_naive();
         self.usage
             .iter()
-            .filter(|t| t.agent == agent && is_today(t.at))
+            .filter(|t| t.agent == agent && on_local_day(t.at, today))
             .map(|t| t.tokens)
             .sum()
     }
@@ -618,9 +649,10 @@ impl SessionEngine {
     /// API-rate dollars spent today by `agent` — the primary metric for the
     /// API tier, matching the "daily $ cap" setting's semantics.
     pub fn dollars_today(&self, agent: Agent) -> f64 {
+        let today = Local::now().date_naive();
         self.usage
             .iter()
-            .filter(|t| t.agent == agent && is_today(t.at))
+            .filter(|t| t.agent == agent && on_local_day(t.at, today))
             .map(|t| t.usd)
             .sum()
     }
@@ -688,31 +720,14 @@ impl SessionEngine {
             }
         });
 
-        // Age out usage ticks past the 7-day window, decrementing the totals.
-        // Wall-clock here (usage ticks are SystemTime); a clock that jumped
-        // backwards just keeps the tick (treat as still fresh).
+        // Age out usage ticks past the 7-day window. The window accessors sum
+        // these ticks directly, so dropping a tick is all the bookkeeping there
+        // is — no running counter to keep in sync. Wall-clock here (ticks are
+        // SystemTime); a clock that jumped backwards keeps the tick (treat as
+        // still fresh) rather than discarding real usage.
         let wall = SystemTime::now();
-        // Accumulate removals into locals first — the retain closure can't also
-        // borrow self.weekly_* while self.usage is mutably borrowed.
-        let mut removed_tokens: HashMap<Agent, u64> = HashMap::new();
-        let mut removed_dollars: HashMap<Agent, f64> = HashMap::new();
-        self.usage.retain(|t| {
-            if wall.duration_since(t.at).map(|d| d < WEEK).unwrap_or(true) {
-                true
-            } else {
-                *removed_tokens.entry(t.agent).or_insert(0) += t.tokens;
-                *removed_dollars.entry(t.agent).or_insert(0.0) += t.usd;
-                false
-            }
-        });
-        for (agent, tok) in removed_tokens {
-            let e = self.weekly_tokens.entry(agent).or_insert(0);
-            *e = e.saturating_sub(tok);
-        }
-        for (agent, usd) in removed_dollars {
-            let e = self.weekly_dollars.entry(agent).or_insert(0.0);
-            *e = (*e - usd).max(0.0);
-        }
+        self.usage
+            .retain(|t| wall.duration_since(t.at).map(|d| d < WEEK).unwrap_or(true));
     }
 }
 
@@ -817,4 +832,73 @@ pub fn open_with_retry(path: &Path) -> Option<File> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push_tick(e: &mut SessionEngine, agent: Agent, tokens: u64, usd: f64, at: SystemTime) {
+        e.usage.push(UsageTick {
+            agent,
+            tokens,
+            usd,
+            at,
+        });
+    }
+
+    #[test]
+    fn windows_sum_only_in_range_ticks_per_agent() {
+        let mut e = SessionEngine::new();
+        let now = SystemTime::now();
+        push_tick(&mut e, Agent::Claude, 100, 1.0, now); // in 5h + 7d
+        push_tick(
+            &mut e,
+            Agent::Claude,
+            50,
+            0.5,
+            now - Duration::from_secs(6 * 3600),
+        ); // in 7d, outside 5h
+        push_tick(
+            &mut e,
+            Agent::Claude,
+            25,
+            0.25,
+            now - Duration::from_secs(8 * 24 * 3600),
+        ); // outside 7d
+        push_tick(&mut e, Agent::Codex, 999, 9.0, now); // other agent
+
+        assert_eq!(e.tokens_5h(Agent::Claude), 100);
+        assert_eq!(e.tokens_7d(Agent::Claude), 150);
+        assert_eq!(e.weekly_tokens(Agent::Claude), 150);
+        assert!((e.weekly_dollars(Agent::Claude) - 1.5).abs() < 1e-9);
+        assert_eq!(e.tokens_7d(Agent::Codex), 999);
+        assert_eq!(e.weekly_tokens(Agent::Codex), 999);
+    }
+
+    #[test]
+    fn prune_drops_ticks_older_than_a_week_and_totals_follow() {
+        let mut e = SessionEngine::new();
+        let now = SystemTime::now();
+        push_tick(&mut e, Agent::Claude, 100, 1.0, now);
+        push_tick(
+            &mut e,
+            Agent::Claude,
+            25,
+            0.25,
+            now - Duration::from_secs(8 * 24 * 3600),
+        );
+        e.prune();
+        assert_eq!(e.usage.len(), 1);
+        assert_eq!(e.weekly_tokens(Agent::Claude), 100);
+        assert!((e.weekly_dollars(Agent::Claude) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn future_stamped_tick_is_treated_as_in_window() {
+        let mut e = SessionEngine::new();
+        let now = SystemTime::now();
+        push_tick(&mut e, Agent::Claude, 42, 0.0, now + Duration::from_secs(3600));
+        assert_eq!(e.tokens_7d(Agent::Claude), 42);
+    }
 }
