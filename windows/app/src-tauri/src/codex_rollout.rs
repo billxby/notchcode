@@ -246,11 +246,27 @@ pub fn session_id_from_path(path: &Path) -> Option<String> {
     let parts: Vec<&str> = stem.split('-').collect();
     if parts.len() >= 5 {
         let candidate = parts[parts.len() - 5..].join("-");
-        if candidate.len() == 36 {
+        if is_uuid(&candidate) {
             return Some(candidate);
         }
     }
     Some(stem.to_string())
+}
+
+/// True if `s` is a canonical `8-4-4-4-12` hex UUID. The old `len() == 36` check
+/// accepted any 36-byte string and rejected nothing shaped differently, so a
+/// rollout filename whose timestamp carried extra hyphens could slip past it —
+/// keying the session differently from the hook payload's `session_id` and
+/// splitting its state across the file and hook ingestion paths.
+fn is_uuid(s: &str) -> bool {
+    let mut groups = s.split('-');
+    for &n in &[8usize, 4, 4, 4, 12] {
+        match groups.next() {
+            Some(g) if g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()) => {}
+            _ => return false,
+        }
+    }
+    groups.next().is_none()
 }
 
 /// True for `rollout-*.jsonl` files.
@@ -261,4 +277,34 @@ pub fn is_rollout_file(path: &Path) -> bool {
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with("rollout-"))
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn is_uuid_accepts_canonical_and_rejects_lookalikes() {
+        assert!(is_uuid("0598208e-f49a-449f-9bea-2aa54ef71563"));
+        assert!(!is_uuid("0598208e-f49a-449f-9bea-2aa54ef7156")); // 11 in last group
+        assert!(!is_uuid("0598208eXf49aX449fX9beaX2aa54ef71563")); // no hyphens, 36 bytes
+        assert!(!is_uuid("zzzzzzzz-f49a-449f-9bea-2aa54ef71563")); // non-hex
+        assert!(!is_uuid("0598208e-f49a-449f-9bea-2aa54ef71563-x")); // trailing group
+    }
+
+    #[test]
+    fn session_id_extracts_uuid_past_a_hyphenated_timestamp() {
+        let p = PathBuf::from("rollout-2026-06-17T10-00-00-0598208e-f49a-449f-9bea-2aa54ef71563.jsonl");
+        assert_eq!(
+            session_id_from_path(&p).as_deref(),
+            Some("0598208e-f49a-449f-9bea-2aa54ef71563")
+        );
+    }
+
+    #[test]
+    fn session_id_falls_back_to_stem_without_a_uuid() {
+        let p = PathBuf::from("rollout-no-uuid-here.jsonl");
+        assert_eq!(session_id_from_path(&p).as_deref(), Some("rollout-no-uuid-here"));
+    }
 }
