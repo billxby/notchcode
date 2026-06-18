@@ -155,8 +155,18 @@ pub fn forward(agent: Agent, event: &str) {
     let pid = winutil::resolve_session_pid(agent.process_name());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], HOOK_PORT));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
-        return; // app not running / port closed — fire-and-forget, exit clean.
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
+        Ok(s) => s,
+        Err(_) => {
+            // App isn't running — launch it and deliver this hook once it's up,
+            // so a session started from a cold machine still lights the notch.
+            // Bounded (~3s) so a hook never blocks the agent for long; if it
+            // never comes up we exit clean, exactly as before.
+            match connect_after_launch(&addr) {
+                Some(s) => s,
+                None => return,
+            }
+        }
     };
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -180,6 +190,43 @@ pub fn forward(agent: Agent, event: &str) {
     // RST on close; we don't care about the contents.
     let mut sink = [0u8; 64];
     let _ = stream.read(&mut sink);
+}
+
+/// Launch the main app detached, then poll-connect to the loopback server until
+/// it binds (~15 × 200ms ≈ 3s cap). Returns a connected stream once the freshly
+/// launched (or a racing) instance is serving, or `None` if it never comes up.
+///
+/// Concurrency: simultaneous hooks (PreToolUse + UserPromptSubmit fire together)
+/// each call this and each spawns an exe, but `tauri-plugin-single-instance`
+/// keeps only one overlay — the extra processes forward-and-exit. Every
+/// forwarder then connects to the one survivor and POSTs. The cost is a couple
+/// of throwaway short-lived processes, never duplicate overlays.
+fn connect_after_launch(addr: &SocketAddr) -> Option<TcpStream> {
+    launch_detached_app();
+    for _ in 0..15 {
+        std::thread::sleep(Duration::from_millis(200));
+        if let Ok(stream) = TcpStream::connect_timeout(addr, Duration::from_millis(200)) {
+            return Some(stream);
+        }
+    }
+    None
+}
+
+/// Spawn this very binary in normal (no-arg) app mode, fully detached so it
+/// outlives this short-lived forwarder process and never flashes a console.
+fn launch_detached_app() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS (0x0000_0008): not tied to this process / console.
+        // CREATE_NO_WINDOW (0x0800_0000): no console window appears.
+        cmd.creation_flags(0x0000_0008 | 0x0800_0000);
+    }
+    let _ = cmd.spawn();
 }
 
 /// Spawn the hook server. Returns immediately; serves on its own thread, one
