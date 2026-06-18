@@ -548,6 +548,9 @@ function App() {
       setDetail(null);
       return;
     }
+    // Don't keep round-tripping IPC for a session that's no longer in the list
+    // (ended + removed) — it would re-fetch on every state event forever.
+    if (!state.sessions.some((s) => s.id === selectedId)) return;
     let cancelled = false;
     invoke<SessionDetail | null>("get_session", { id: selectedId }).then((d) => {
       if (!cancelled) setDetail(d);
@@ -583,6 +586,29 @@ function App() {
   // ---- Usage brake -------------------------------------------------------
 
   const today = new Date().toDateString();
+  // A "dismiss for today" must re-arm at the day boundary even if nothing
+  // re-renders the component over midnight (idle machine, no session events).
+  // Deriving the day from render time alone left a dismissal suppressed past
+  // midnight — or re-fired by a stale state event. Clear it on a timer to the
+  // next local midnight instead.
+  useEffect(() => {
+    if (!brakeDismissedDay) return;
+    const now = new Date();
+    const nextMidnight = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+      0,
+      0,
+      1
+    );
+    const t = setTimeout(
+      () => setBrakeDismissedDay(null),
+      nextMidnight.getTime() - now.getTime()
+    );
+    return () => clearTimeout(t);
+  }, [brakeDismissedDay]);
+
   // Per-agent brake: an agent fires when its own usage crosses the shared
   // threshold. One "dismiss for today" quiets both until the day rolls over.
   const brakedAgents: Agent[] =

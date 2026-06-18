@@ -97,7 +97,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 /// frontend to switch to the requested view.
 fn open_view(app: &AppHandle, view: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+        // Don't reveal the overlay over a fullscreen game/video. The watch loop
+        // hides it on the fullscreen edge and only re-shows on exit, so showing
+        // it here would leave the pill painted over the game until then.
+        if !crate::winutil::foreground_is_fullscreen() {
+            let _ = window.show();
+        }
     }
     let _ = app.emit(OPEN_VIEW_EVENT, view);
 }
