@@ -128,10 +128,47 @@ fn set_docked(docked: bool) {
     overlay::set_docked(docked);
 }
 
-/// Persist the blob's position (logical px) + docked state for next launch.
+/// Persist the blob's position (logical px) + docked state + docked monitor for
+/// next launch. `monitor` is the OS monitor name (None = primary).
 #[tauri::command]
-fn save_overlay_pos(app: tauri::AppHandle, x: i32, y: i32, docked: bool) {
-    store::save(&app, store::OverlayPos { x, y, docked });
+fn save_overlay_pos(
+    app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    docked: bool,
+    monitor: Option<String>,
+) {
+    store::save(
+        &app,
+        store::OverlayPos {
+            x,
+            y,
+            docked,
+            monitor,
+        },
+    );
+}
+
+/// List connected monitors for the Display picker (tray submenu / Settings).
+#[tauri::command]
+fn list_monitors(window: tauri::WebviewWindow) -> Vec<overlay::MonitorInfo> {
+    overlay::list_monitors(&window)
+}
+
+/// Dock the notch to a chosen monitor (the Display picker). Empty name =
+/// primary. Docks immediately and persists the choice.
+#[tauri::command]
+fn dock_to_monitor(app: tauri::AppHandle, window: tauri::WebviewWindow, name: String) {
+    overlay::dock_to_monitor(&window, &name);
+    store::save(
+        &app,
+        store::OverlayPos {
+            x: 0,
+            y: 0,
+            docked: true,
+            monitor: overlay::current_monitor_name(),
+        },
+    );
 }
 
 // ---- Session commands -------------------------------------------------------
@@ -230,11 +267,15 @@ pub fn run() {
             app.manage(settings::SharedSettings::new(loaded));
 
             if let Some(window) = app.get_webview_window("main") {
-                // Restore a floating position from last run, else dock at top.
-                let restore = store::load(app.handle())
+                // Restore a floating position from last run, else dock at top;
+                // either way restore the docked-monitor choice so the notch
+                // reappears on the display the user last parked it on.
+                let saved = store::load(app.handle());
+                let monitor = saved.as_ref().and_then(|p| p.monitor.clone());
+                let restore = saved
                     .filter(|p| !p.docked)
                     .map(|p| (p.x as f64, p.y as f64));
-                overlay::setup_overlay(&window, restore);
+                overlay::setup_overlay(&window, restore, monitor);
             }
             installer::ensure_installed();
             tray::setup(app.handle())?;
@@ -266,7 +307,9 @@ pub fn run() {
             set_autostart,
             overlay_docked,
             set_docked,
-            save_overlay_pos
+            save_overlay_pos,
+            list_monitors,
+            dock_to_monitor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

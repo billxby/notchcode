@@ -7,11 +7,16 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 /// Saved placement. `docked` true ⇒ ignore x/y and start as a top notch.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OverlayPos {
     pub x: i32,
     pub y: i32,
     pub docked: bool,
+    /// OS name of the monitor to dock to (e.g. "\\.\DISPLAY2"). `None` = the
+    /// primary monitor. `serde(default)` so configs written before multi-monitor
+    /// support still parse.
+    #[serde(default)]
+    pub monitor: Option<String>,
 }
 
 fn store_path(app: &AppHandle) -> Option<PathBuf> {

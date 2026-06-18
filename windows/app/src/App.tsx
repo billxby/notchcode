@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  availableMonitors,
   currentMonitor,
   getCurrentWindow,
   LogicalPosition,
@@ -82,6 +83,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   focus_terminal_on_waiting: true,
 };
 
+/** One monitor in logical px (window scale); `name` is the OS monitor id. */
+type MonitorRect = {
+  name: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
 type DragState = {
   target: Element;
   pointerId: number;
@@ -89,10 +99,19 @@ type DragState = {
   startSY: number;
   startWX: number;
   startWY: number;
+  /** The monitor the drag started on (logical px) — snap fallback. */
   monLeft: number;
   monWidth: number;
   monTop: number;
   monHeight: number;
+  /** Every connected monitor in logical px (window scale), so the drag can
+      travel onto any of them and a release can dock to the one it lands on. */
+  monitors: MonitorRect[];
+  /** Union rect of all monitors (logical px) — the drag travel bounds. */
+  uLeft: number;
+  uTop: number;
+  uRight: number;
+  uBottom: number;
   /** Current window size (logical px) for clamping/snapping — the pill and
       the expanded sheet windows differ, so it's read live at drag start. */
   winW: number;
@@ -738,10 +757,10 @@ function App() {
   function setWinPos(x: number, y: number) {
     getCurrentWindow().setPosition(new LogicalPosition(Math.round(x), Math.round(y)));
   }
-  const clampX = (d: DragState, x: number) =>
-    clamp(x, d.monLeft, d.monLeft + d.monWidth - d.winW);
-  const clampY = (d: DragState, y: number) =>
-    clamp(y, d.monTop, d.monTop + d.monHeight - d.winH);
+  // Clamp to the union of all monitors so the eased follow + fling can travel
+  // across displays (the union bounds are computed at drag start).
+  const clampX = (d: DragState, x: number) => clamp(x, d.uLeft, d.uRight - d.winW);
+  const clampY = (d: DragState, y: number) => clamp(y, d.uTop, d.uBottom - d.winH);
 
   /** rAF loop: ease `cur` toward `target`, recording the delta as velocity. */
   function followStep() {
@@ -791,6 +810,11 @@ function App() {
       monWidth: window.screen.width,
       monTop: 0,
       monHeight: window.screen.height,
+      monitors: [],
+      uLeft: 0,
+      uTop: 0,
+      uRight: window.screen.width,
+      uBottom: window.screen.height,
       winW: PILL_WINDOW_WIDTH,
       winH: PILL_WINDOW_HEIGHT,
       moved: false,
@@ -810,7 +834,8 @@ function App() {
       wnd.outerPosition(),
       currentMonitor(),
       wnd.outerSize(),
-    ]).then(([scale, pos, mon, size]) => {
+      availableMonitors(),
+    ]).then(([scale, pos, mon, size, monitors]) => {
       const d = drag.current;
       if (!d) return;
       d.startWX = pos.x / scale;
@@ -822,6 +847,24 @@ function App() {
         d.monWidth = mon.size.width / scale;
         d.monTop = mon.position.y / scale;
         d.monHeight = mon.size.height / scale;
+      }
+      // All monitors in one logical coordinate space (window scale), so the
+      // pill can be dragged across the seam between displays and the union
+      // becomes the travel bounds — previously the clamp was the single
+      // start-monitor, so the pill could never reach a second monitor.
+      const rects = (monitors ?? []).map((m) => ({
+        name: m.name ?? null,
+        left: m.position.x / scale,
+        top: m.position.y / scale,
+        width: m.size.width / scale,
+        height: m.size.height / scale,
+      }));
+      if (rects.length) {
+        d.monitors = rects;
+        d.uLeft = Math.min(...rects.map((r) => r.left));
+        d.uTop = Math.min(...rects.map((r) => r.top));
+        d.uRight = Math.max(...rects.map((r) => r.left + r.width));
+        d.uBottom = Math.max(...rects.map((r) => r.top + r.height));
       }
       // Seed the eased-follow state at the window's real position so the first
       // frame doesn't lurch from (0,0).
@@ -845,6 +888,8 @@ function App() {
     }
     if (!d.moved || !d.ready) return;
 
+    // Set the eased-follow target (the rAF loop moves the window toward it),
+    // clamped to the union of all monitors so the pill can cross displays.
     d.targetX = clampX(d, d.startWX + dx);
     d.targetY = clampY(d, d.startWY + dy);
   }
@@ -873,33 +918,49 @@ function App() {
       settleFloating(d);
       return;
     }
-    if (d.curY <= d.monTop + SNAP_Y) snapToDock(d);
+    // Dock to whichever monitor the pill's (eased) center is over — not the
+    // drag-start monitor — so dropping near the top of display 2 docks there.
+    const host = hostMonitor(d);
+    if (d.curY <= host.top + SNAP_Y) snapToDock(d, host);
     else fling(d);
   }
 
-  /** Glide into the top-center dock with an ease, then persist docked state. */
-  function snapToDock(d: DragState) {
-    const sx = d.monLeft + (d.monWidth - d.winW) / 2;
-    const sy = d.monTop;
+  /** The monitor under the pill's current (eased) center, else the start one. */
+  function hostMonitor(d: DragState): MonitorRect {
+    const cx = d.curX + d.winW / 2;
+    const cy = d.curY + d.winH / 2;
+    return (
+      d.monitors.find(
+        (r) => cx >= r.left && cx < r.left + r.width && cy >= r.top && cy < r.top + r.height
+      ) ?? {
+        name: null,
+        left: d.monLeft,
+        top: d.monTop,
+        width: d.monWidth,
+        height: d.monHeight,
+      }
+    );
+  }
+
+  /** Glide into the host monitor's top-center, then hand docking + persistence
+      to Rust (DPI-correct physical-px centering, and it remembers the display
+      so the watch loop keeps the notch there instead of the primary). */
+  function snapToDock(d: DragState, host: MonitorRect) {
+    const sx = host.left + (host.width - d.winW) / 2;
+    const sy = host.top;
     const x0 = d.curX;
     const y0 = d.curY;
     tween(
       190,
       (e) => setWinPos(x0 + (sx - x0) * e, y0 + (sy - y0) * e),
       () => {
-        setWinPos(sx, sy);
         updateDocked(true);
-        invoke("set_docked", { docked: true });
-        invoke("save_overlay_pos", {
-          x: Math.round(sx + (d.winW - PILL_WINDOW_WIDTH) / 2),
-          y: Math.round(sy),
-          docked: true,
-        });
+        invoke("dock_to_monitor", { name: host.name ?? "" });
       }
     );
   }
 
-  /** Carry release momentum with friction, clamped to the monitor, then settle. */
+  /** Carry release momentum with friction, clamped to the monitor union, then settle. */
   function fling(d: DragState) {
     let vx = d.velX * 1.4;
     let vy = d.velY * 1.4;
@@ -919,14 +980,16 @@ function App() {
     requestAnimationFrame(step);
   }
 
-  /** Persist the blob's resting position + floating state. */
+  /** Persist the blob's resting position + floating state + the monitor it's over. */
   function settleFloating(d: DragState) {
+    const host = hostMonitor(d);
     updateDocked(false);
     invoke("set_docked", { docked: false });
     invoke("save_overlay_pos", {
       x: Math.round(d.curX + (d.winW - PILL_WINDOW_WIDTH) / 2),
       y: Math.round(d.curY),
       docked: false,
+      monitor: host.name ?? null,
     });
   }
 
