@@ -40,9 +40,15 @@ import {
   type NotchState,
   type SessionDetail,
 } from "./types";
+import { tween, reduceMotion } from "./motion";
 import "./App.css";
 
-const NOTCH_WIDTH = 200;
+// The painted pill has two widths: a minimal resting form so it's barely there
+// when nothing is happening, expanding to the full pill while a session is live.
+// The OS window stays a constant size (PILL_WINDOW_*, transparent shadow room) —
+// only the SVG silhouette tweens, so there's no janky per-state window resize.
+const NOTCH_WIDTH = 200; // active (working / waiting / done / brake)
+const NOTCH_WIDTH_IDLE = 112; // resting, nothing live
 const NOTCH_HEIGHT = 32;
 
 // Collapsed window size (logical px), kept in sync with overlay.rs PILL_SIZE.
@@ -77,6 +83,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   focus_terminal_on_waiting: true,
 };
 
+/** One monitor in logical px (window scale); `name` is the OS monitor id. */
+type MonitorRect = {
+  name: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
 type DragState = {
   target: Element;
   pointerId: number;
@@ -91,7 +106,7 @@ type DragState = {
   monHeight: number;
   /** Every connected monitor in logical px (window scale), so the drag can
       travel onto any of them and a release can dock to the one it lands on. */
-  monitors: { name: string | null; left: number; top: number; width: number; height: number }[];
+  monitors: MonitorRect[];
   /** Union rect of all monitors (logical px) — the drag travel bounds. */
   uLeft: number;
   uTop: number;
@@ -103,6 +118,17 @@ type DragState = {
   winH: number;
   moved: boolean;
   ready: boolean;
+  /** Eased-follow state (logical px). `cur` is where the window actually is,
+      `target` is where the cursor wants it; each frame `cur` eases toward
+      `target`, and the per-frame delta becomes `vel` for release momentum. */
+  curX: number;
+  curY: number;
+  targetX: number;
+  targetY: number;
+  velX: number;
+  velY: number;
+  /** Active rAF handle for the follow loop (0 = not running). */
+  raf: number;
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -540,6 +566,10 @@ function App() {
       ? clamp(v, SHEET_MIN_WIDTH, SHEET_MAX_WIDTH)
       : SHEET_DEFAULT_WIDTH;
   });
+  // Painted width of the resting pill, tweened between idle and active forms.
+  const [pillWidth, setPillWidth] = useState(NOTCH_WIDTH_IDLE);
+  // True while the panel plays its exit animation before collapsing to the pill.
+  const [closing, setClosing] = useState(false);
 
   const drag = useRef<DragState | null>(null);
   const resize = useRef<{ startX: number; startW: number; lastW: number } | null>(
@@ -555,6 +585,12 @@ function App() {
   const prevBrake = useRef(false);
   // Single-shot terminal jump per waiting episode (matches the Mac affordance).
   const jumpConsumed = useRef(false);
+  // Live painted pill width + the cancel handle for an in-flight width tween, so
+  // a new idle↔active transition interrupts the old one cleanly.
+  const pillWidthRef = useRef(NOTCH_WIDTH_IDLE);
+  const widthCancel = useRef<() => void>(() => {});
+  // Pending collapse-animation timer (cleared on unmount / re-entry).
+  const closeTimer = useRef<number | null>(null);
 
   useEffect(() => {
     const unlisten = listen<NotchState>("notch-state", (e) => setState(e.payload));
@@ -624,6 +660,23 @@ function App() {
       : [];
   const brakeEngaged = brakedAgents.length > 0;
 
+  // ---- Idle ↔ active pill width ------------------------------------------
+  // The pill rests minimal and grows only while something is live, so it's
+  // barely there at idle. Tween the painted SVG width (the window is unchanged).
+  const pillActive = state.status !== "idle" || brakeEngaged;
+  useEffect(() => {
+    const to = pillActive ? NOTCH_WIDTH : NOTCH_WIDTH_IDLE;
+    const from = pillWidthRef.current;
+    if (Math.round(from) === to) return;
+    widthCancel.current();
+    widthCancel.current = tween(220, (e) => {
+      const w = from + (to - from) * e;
+      pillWidthRef.current = w;
+      setPillWidth(w);
+    });
+    return () => widthCancel.current();
+  }, [pillActive]);
+
   // First engage → auto-expand the panel once so it can't be missed.
   useEffect(() => {
     if (brakeEngaged && !prevBrake.current && viewRef.current === "pill") {
@@ -661,6 +714,23 @@ function App() {
   }
   goToRef.current = goTo;
 
+  // Collapse the open sheet back to the pill, playing a short exit animation
+  // first so it eases away instead of vanishing. Reduced motion collapses
+  // instantly. Guarded against double-entry while the exit is mid-flight.
+  function collapseToPill() {
+    if (viewRef.current === "pill" || closeTimer.current !== null) return;
+    if (reduceMotion()) {
+      goTo("pill");
+      return;
+    }
+    setClosing(true);
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      setClosing(false);
+      goTo("pill");
+    }, 150);
+  }
+
   function onPillClick() {
     if (state.status === "waiting" && !jumpConsumed.current) {
       jumpConsumed.current = true;
@@ -678,6 +748,38 @@ function App() {
   }
 
   // ---- Dragging the blob -------------------------------------------------
+  // The window doesn't snap 1:1 to the cursor: a rAF loop eases its position
+  // toward the cursor (smooth follow), the per-frame delta becomes release
+  // velocity, and letting go either flings with friction or glides into the
+  // dock. Reduced motion collapses all of this to the old instant behavior.
+
+  /** Fire-and-forget window move, logical px (matches the old drag contract). */
+  function setWinPos(x: number, y: number) {
+    getCurrentWindow().setPosition(new LogicalPosition(Math.round(x), Math.round(y)));
+  }
+  // Clamp to the union of all monitors so the eased follow + fling can travel
+  // across displays (the union bounds are computed at drag start).
+  const clampX = (d: DragState, x: number) => clamp(x, d.uLeft, d.uRight - d.winW);
+  const clampY = (d: DragState, y: number) => clamp(y, d.uTop, d.uBottom - d.winH);
+
+  /** rAF loop: ease `cur` toward `target`, recording the delta as velocity. */
+  function followStep() {
+    const d = drag.current;
+    if (!d || d.raf === 0) return;
+    if (!d.ready) {
+      d.raf = requestAnimationFrame(followStep);
+      return;
+    }
+    const k = reduceMotion() ? 1 : 0.4; // higher = snappier follow, less lag
+    const nx = d.curX + (d.targetX - d.curX) * k;
+    const ny = d.curY + (d.targetY - d.curY) * k;
+    d.velX = nx - d.curX;
+    d.velY = ny - d.curY;
+    d.curX = nx;
+    d.curY = ny;
+    setWinPos(nx, ny);
+    d.raf = requestAnimationFrame(followStep);
+  }
 
   function onPointerDown(e: React.PointerEvent) {
     // In the expanded views, only empty chrome starts a window drag — pressing
@@ -717,6 +819,13 @@ function App() {
       winH: PILL_WINDOW_HEIGHT,
       moved: false,
       ready: false,
+      curX: 0,
+      curY: 0,
+      targetX: 0,
+      targetY: 0,
+      velX: 0,
+      velY: 0,
+      raf: 0,
     };
 
     const wnd = getCurrentWindow();
@@ -757,6 +866,10 @@ function App() {
         d.uRight = Math.max(...rects.map((r) => r.left + r.width));
         d.uBottom = Math.max(...rects.map((r) => r.top + r.height));
       }
+      // Seed the eased-follow state at the window's real position so the first
+      // frame doesn't lurch from (0,0).
+      d.curX = d.targetX = d.startWX;
+      d.curY = d.targetY = d.startWY;
       d.ready = true;
     });
   }
@@ -771,21 +884,25 @@ function App() {
       d.moved = true;
       d.target.setPointerCapture(d.pointerId);
       if (dockedRef.current) updateDocked(false);
+      d.raf = requestAnimationFrame(followStep); // begin eased follow
     }
     if (!d.moved || !d.ready) return;
 
-    const nx = clamp(d.startWX + dx, d.uLeft, d.uRight - d.winW);
-    const ny = clamp(d.startWY + dy, d.uTop, d.uBottom - d.winH);
-    getCurrentWindow().setPosition(new LogicalPosition(Math.round(nx), Math.round(ny)));
+    // Set the eased-follow target (the rAF loop moves the window toward it),
+    // clamped to the union of all monitors so the pill can cross displays.
+    d.targetX = clampX(d, d.startWX + dx);
+    d.targetY = clampY(d, d.startWY + dy);
   }
 
   function onPointerUp(e: React.PointerEvent) {
     const d = drag.current;
-    drag.current = null;
     if (!d) return;
+    if (d.raf) cancelAnimationFrame(d.raf);
+    d.raf = 0;
     if (d.target.hasPointerCapture(e.pointerId)) {
       d.target.releasePointerCapture(e.pointerId);
     }
+    drag.current = null;
 
     if (!d.moved) {
       if (viewRef.current === "pill") onPillClick();
@@ -796,44 +913,83 @@ function App() {
     // A drag's release also fires a click on whatever it ends over — swallow it.
     suppressClick.current = true;
 
-    const wnd = getCurrentWindow();
-    Promise.all([wnd.scaleFactor(), wnd.outerPosition()]).then(([scale, pos]) => {
-      const xL = pos.x / scale;
-      const yL = pos.y / scale;
-      // Which monitor is the pill's center over? Dock to that one's top edge —
-      // not the drag-start monitor — so dropping near the top of monitor 2 docks
-      // there. Fall back to the start monitor if the lookup misses.
-      const cx = xL + d.winW / 2;
-      const cy = yL + d.winH / 2;
-      const host =
-        d.monitors.find(
-          (r) => cx >= r.left && cx < r.left + r.width && cy >= r.top && cy < r.top + r.height
-        ) ?? {
-          name: null,
-          left: d.monLeft,
-          top: d.monTop,
-          width: d.monWidth,
-          height: d.monHeight,
-        };
-      const shouldDock = yL <= host.top + SNAP_Y;
-      if (shouldDock) {
-        updateDocked(true);
-        // Hand placement + persistence to Rust: it centers on the chosen monitor
-        // in physical px (DPI-correct) and remembers it, so the watch loop keeps
-        // the notch on that display instead of yanking it to the primary.
-        invoke("dock_to_monitor", { name: host.name ?? "" });
-      } else {
-        updateDocked(false);
-        invoke("set_docked", { docked: false });
-        // Persist the pill-equivalent top-left (the windows share a center axis)
-        // plus the monitor it floated over, so it reopens where expected.
-        invoke("save_overlay_pos", {
-          x: Math.round(xL + (d.winW - PILL_WINDOW_WIDTH) / 2),
-          y: Math.round(yL),
-          docked: false,
-          monitor: host.name ?? null,
-        });
+    if (!d.ready) {
+      // Geometry never arrived — commit current position without animating.
+      settleFloating(d);
+      return;
+    }
+    // Dock to whichever monitor the pill's (eased) center is over — not the
+    // drag-start monitor — so dropping near the top of display 2 docks there.
+    const host = hostMonitor(d);
+    if (d.curY <= host.top + SNAP_Y) snapToDock(d, host);
+    else fling(d);
+  }
+
+  /** The monitor under the pill's current (eased) center, else the start one. */
+  function hostMonitor(d: DragState): MonitorRect {
+    const cx = d.curX + d.winW / 2;
+    const cy = d.curY + d.winH / 2;
+    return (
+      d.monitors.find(
+        (r) => cx >= r.left && cx < r.left + r.width && cy >= r.top && cy < r.top + r.height
+      ) ?? {
+        name: null,
+        left: d.monLeft,
+        top: d.monTop,
+        width: d.monWidth,
+        height: d.monHeight,
       }
+    );
+  }
+
+  /** Glide into the host monitor's top-center, then hand docking + persistence
+      to Rust (DPI-correct physical-px centering, and it remembers the display
+      so the watch loop keeps the notch there instead of the primary). */
+  function snapToDock(d: DragState, host: MonitorRect) {
+    const sx = host.left + (host.width - d.winW) / 2;
+    const sy = host.top;
+    const x0 = d.curX;
+    const y0 = d.curY;
+    tween(
+      190,
+      (e) => setWinPos(x0 + (sx - x0) * e, y0 + (sy - y0) * e),
+      () => {
+        updateDocked(true);
+        invoke("dock_to_monitor", { name: host.name ?? "" });
+      }
+    );
+  }
+
+  /** Carry release momentum with friction, clamped to the monitor union, then settle. */
+  function fling(d: DragState) {
+    let vx = d.velX * 1.4;
+    let vy = d.velY * 1.4;
+    if (reduceMotion() || Math.hypot(vx, vy) < 0.5) {
+      settleFloating(d);
+      return;
+    }
+    const step = () => {
+      vx *= 0.9;
+      vy *= 0.9;
+      d.curX = clampX(d, d.curX + vx);
+      d.curY = clampY(d, d.curY + vy);
+      setWinPos(d.curX, d.curY);
+      if (Math.hypot(vx, vy) > 0.4) requestAnimationFrame(step);
+      else settleFloating(d);
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** Persist the blob's resting position + floating state + the monitor it's over. */
+  function settleFloating(d: DragState) {
+    const host = hostMonitor(d);
+    updateDocked(false);
+    invoke("set_docked", { docked: false });
+    invoke("save_overlay_pos", {
+      x: Math.round(d.curX + (d.winW - PILL_WINDOW_WIDTH) / 2),
+      y: Math.round(d.curY),
+      docked: false,
+      monitor: host.name ?? null,
     });
   }
 
@@ -891,18 +1047,20 @@ function App() {
           title="Notchcode — drag to move, drag to the top to dock"
         >
           {docked ? (
-            <NotchShape width={NOTCH_WIDTH} height={NOTCH_HEIGHT}>
+            <NotchShape width={Math.round(pillWidth)} height={NOTCH_HEIGHT}>
               {PillContent}
             </NotchShape>
           ) : (
-            <BlobShape width={NOTCH_WIDTH} height={NOTCH_HEIGHT}>
+            <BlobShape width={Math.round(pillWidth)} height={NOTCH_HEIGHT}>
               {PillContent}
             </BlobShape>
           )}
         </div>
       ) : (
         <div
-          className={`sheet ${docked ? "docked" : "floating"} view-${view}`}
+          className={`sheet ${docked ? "docked" : "floating"} view-${view} ${
+            closing ? "closing" : ""
+          }`}
           style={{ width: sheetWidth }}
           ref={sheetRef}
           onPointerDown={onPointerDown}
@@ -927,7 +1085,7 @@ function App() {
                 setSelectedId(id);
                 goTo("detail");
               }}
-              onCollapse={() => goTo("pill")}
+              onCollapse={collapseToPill}
               onSettings={() => goTo("settings")}
               onDismissBrake={() => setBrakeDismissedDay(today)}
             />

@@ -27,6 +27,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 # Toast notifications when an agent blocks on the user (the §0.5 waiting alert).
 tauri-plugin-notification = "2"
+# Single-instance guard: a second launch — including a hook that relaunches us
+# while a copy is already up — forwards to the primary and exits, so we never
+# stack two overlays. Must be the first plugin registered in lib.rs.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 # Local calendar-day math for the "today" usage window + brake (the rolling
 # 7-day window only needs SystemTime, but "since local midnight" needs a tz).

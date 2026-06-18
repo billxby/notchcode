@@ -243,6 +243,16 @@ pub fn run() {
     let engine: SharedEngine = Arc::new(Mutex::new(SessionEngine::new()));
 
     tauri::Builder::default()
+        // Single-instance MUST be registered first: it intercepts a duplicate
+        // launch (e.g. a hook relaunching us while a copy already runs) before
+        // any other setup, forwards to the primary, and exits the newcomer.
+        // The primary just re-reveals its overlay — there's no main window to
+        // focus in the usual sense, but show() covers the fullscreen-hidden case.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(

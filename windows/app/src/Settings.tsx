@@ -493,7 +493,9 @@ export default function SettingsView({
             <Toggle checked={autostart} onChange={toggleAutostart} />
           </div>
           <div className="set-help">
-            Start Notchcode automatically when you log in to this PC.
+            Start Notchcode automatically when you log in to this PC. Even if you
+            quit it, Notchcode relaunches on its own the next time a Claude Code
+            or Codex session starts.
           </div>
         </Section>
 

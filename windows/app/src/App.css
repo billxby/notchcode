@@ -84,6 +84,17 @@ svg {
 .notch-wrap {
   cursor: pointer;
   touch-action: none;
+  /* Scale from the top edge so the docked notch stays flush while it grows. */
+  transform-origin: top center;
+  transition: transform 150ms var(--ease, cubic-bezier(0.2, 0.8, 0.2, 1));
+}
+/* Subtle lift on hover; a gentle press-in when poked while docked (a floating
+   blob's :active is the drag grab, so it's left unscaled there). */
+.notch-wrap:hover {
+  transform: scale(1.025);
+}
+.notch-wrap.docked:active {
+  transform: scale(0.96);
 }
 .notch-wrap.floating {
   cursor: grab;
@@ -374,6 +385,24 @@ svg {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+/* Collapse exit — the sheet eases up and out before the window shrinks to the
+   pill (driven by the `closing` class for ~150ms in App.tsx). `forwards` holds
+   the faded-out frame so it doesn't flash back before unmount. */
+.sheet.closing {
+  animation: sheet-out 0.15s ease-in forwards;
+  pointer-events: none;
+}
+@keyframes sheet-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
   }
 }
 
@@ -1249,8 +1278,16 @@ svg {
 /* Respect the OS "reduce motion" setting — kill the looping/entrance motion but
    keep state-change transitions, which convey meaning rather than decorate. */
 @media (prefers-reduced-motion: reduce) {
-  .sheet {
+  .sheet,
+  .sheet.closing {
     animation: none;
+  }
+  .notch-wrap {
+    transition: none;
+  }
+  .notch-wrap:hover,
+  .notch-wrap.docked:active {
+    transform: none;
   }
   .glyph-pulse,
   .glyph-waiting,
