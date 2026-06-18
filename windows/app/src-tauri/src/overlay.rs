@@ -10,8 +10,11 @@
 // seam.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, WebviewWindow, WindowEvent};
+
+use serde::Serialize;
+use tauri::{LogicalPosition, LogicalSize, Monitor, PhysicalPosition, WebviewWindow, WindowEvent};
 
 /// Docked (true) = snapped flush to the top edge, rendered as the notch.
 /// Floating (false) = dragged somewhere on screen, rendered as a rounded blob.
@@ -19,12 +22,110 @@ use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, WebviewWindow, Windo
 /// blob back to the top. Single-window app, so a module-level flag is enough.
 static DOCKED: AtomicBool = AtomicBool::new(true);
 
+/// Name of the monitor the notch docks to (e.g. `\\.\DISPLAY2`). `None` means
+/// "the primary monitor" — the historical behavior. A single-window app, so a
+/// module-level cell is enough. Persisted across runs via store::OverlayPos.
+static DOCKED_MONITOR: Mutex<Option<String>> = Mutex::new(None);
+
 pub fn is_docked() -> bool {
     DOCKED.load(Ordering::Relaxed)
 }
 
 pub fn set_docked(docked: bool) {
     DOCKED.store(docked, Ordering::Relaxed);
+}
+
+/// Set (or clear, with `None`) the monitor the notch docks to.
+pub fn set_docked_monitor(name: Option<String>) {
+    if let Ok(mut g) = DOCKED_MONITOR.lock() {
+        *g = name;
+    }
+}
+
+fn docked_monitor_name() -> Option<String> {
+    DOCKED_MONITOR.lock().ok().and_then(|g| g.clone())
+}
+
+/// The monitor the notch should dock to: the connected monitor whose OS name
+/// matches the chosen `DOCKED_MONITOR`, else the primary. If the chosen monitor
+/// is no longer connected, clear the choice so we stop chasing a ghost and fall
+/// back to primary — this is what makes a notch docked on a secondary monitor
+/// stay there (the watch loop and every reposition route through here) instead
+/// of being yanked back to the primary.
+fn target_monitor(window: &WebviewWindow) -> Option<Monitor> {
+    if let Some(name) = docked_monitor_name() {
+        if let Ok(monitors) = window.available_monitors() {
+            if let Some(m) = monitors
+                .into_iter()
+                .find(|m| m.name().map(|n| n == &name).unwrap_or(false))
+            {
+                return Some(m);
+            }
+        }
+        set_docked_monitor(None); // chosen monitor unplugged → fall back
+    }
+    window.primary_monitor().ok().flatten()
+}
+
+/// One connected monitor, for the Display picker (tray submenu / Settings).
+#[derive(Serialize, Clone)]
+pub struct MonitorInfo {
+    /// OS monitor name — the stable key passed back to `dock_to_monitor`.
+    pub name: String,
+    /// Human label, e.g. "Monitor 1 (primary) · 2560×1440".
+    pub label: String,
+    pub primary: bool,
+    /// Whether the notch is currently docked to this monitor.
+    pub current: bool,
+}
+
+/// Enumerate connected monitors for the Display picker.
+pub fn list_monitors(window: &WebviewWindow) -> Vec<MonitorInfo> {
+    let primary_name = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .and_then(|m| m.name().map(|s| s.to_string()));
+    let current_name = docked_monitor_name().or_else(|| primary_name.clone());
+    window
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let name = m.name().map(|s| s.to_string()).unwrap_or_default();
+            let primary = Some(&name) == primary_name.as_ref();
+            let current = Some(&name) == current_name.as_ref();
+            let size = m.size();
+            let label = format!(
+                "Monitor {}{} · {}×{}",
+                i + 1,
+                if primary { " (primary)" } else { "" },
+                size.width,
+                size.height
+            );
+            MonitorInfo {
+                name,
+                label,
+                primary,
+                current,
+            }
+        })
+        .collect()
+}
+
+/// Dock the notch to a chosen monitor by OS name (the Display picker). An empty
+/// name means "primary". Persisting the choice is the caller's job (it holds the
+/// AppHandle).
+pub fn dock_to_monitor(window: &WebviewWindow, name: &str) {
+    set_docked(true);
+    set_docked_monitor((!name.is_empty()).then(|| name.to_string()));
+    reposition(window);
+}
+
+/// The monitor name the notch is currently docked to (for persistence).
+pub fn current_monitor_name() -> Option<String> {
+    docked_monitor_name()
 }
 
 /// How often the watch loop re-derives primary-monitor placement and re-asserts
@@ -56,9 +157,12 @@ const SHEET_MARGIN_H: f64 = 40.0;
 ///
 /// `restore` is the persisted position from a previous run: `Some((x, y))` in
 /// logical px means start *floating* there; `None` means start docked at the
-/// top. Placing before `show()` avoids a flash at the wrong spot.
-pub fn setup_overlay(window: &WebviewWindow, restore: Option<(f64, f64)>) {
+/// top. `monitor` is the persisted docked-monitor name (None = primary), set
+/// before placement so a docked restore lands on the right display. Placing
+/// before `show()` avoids a flash at the wrong spot.
+pub fn setup_overlay(window: &WebviewWindow, restore: Option<(f64, f64)>, monitor: Option<String>) {
     apply_overlay_styles(window);
+    set_docked_monitor(monitor);
 
     match restore {
         Some((x, y)) => {
@@ -88,7 +192,7 @@ pub fn setup_overlay(window: &WebviewWindow, restore: Option<(f64, f64)>) {
 /// physical units here is the classic source of "off by the DPI ratio" overlay
 /// bugs (§11.5 #1).
 pub fn reposition(window: &WebviewWindow) {
-    if let Ok(Some(monitor)) = window.primary_monitor() {
+    if let Some(monitor) = target_monitor(window) {
         let m_pos = monitor.position(); // top-left of the monitor (physical px)
         let m_size = monitor.size(); // monitor size (physical px)
 
@@ -131,7 +235,10 @@ fn start_watchers(window: &WebviewWindow) {
         loop {
             std::thread::sleep(WATCH_INTERVAL);
 
-            if let Ok(Some(monitor)) = watched.primary_monitor() {
+            // Geometry of the monitor we're docked to (chosen or primary), so a
+            // notch parked on a secondary display re-centers there, not on the
+            // primary, when its resolution changes.
+            if let Some(monitor) = target_monitor(&watched) {
                 let p = monitor.position();
                 let s = monitor.size();
                 let geometry = (p.x, p.y, s.width, s.height);
@@ -236,7 +343,17 @@ pub fn resize_sheet(window: &WebviewWindow, sheet_w: f64, sheet_h: f64) {
 /// by half the delta — counter-shift the left edge to cancel that, keeping the
 /// blob/sheet visually pinned where the user parked it while growing down.
 fn resize_keep_center(window: &WebviewWindow, size: LogicalSize<f64>) {
-    let scale = window.scale_factor().unwrap_or(1.0);
+    // Scale of the monitor the window is actually on — not `window.scale_factor()`,
+    // whose cached value can lag the window's real monitor on a mixed-DPI
+    // multi-monitor setup, throwing the floating counter-shift off by the DPI
+    // ratio.
+    let scale = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .or_else(|| window.scale_factor().ok())
+        .unwrap_or(1.0);
     let old_w = window.outer_size().map(|s| s.width as i32).ok();
     let _ = window.set_size(size);
     if is_docked() {
@@ -258,7 +375,7 @@ fn resize_keep_center(window: &WebviewWindow, size: LogicalSize<f64>) {
 /// it doesn't read back the live window size, so it's safe to call right after a
 /// resize before the new size has settled.
 fn reposition_sized(window: &WebviewWindow, size: LogicalSize<f64>) {
-    if let Ok(Some(monitor)) = window.primary_monitor() {
+    if let Some(monitor) = target_monitor(window) {
         let scale = monitor.scale_factor();
         let m_pos = monitor.position();
         let m_size = monitor.size();
