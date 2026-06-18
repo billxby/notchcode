@@ -9,7 +9,7 @@
 #[cfg(windows)]
 mod imp {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WAIT_TIMEOUT};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
@@ -18,16 +18,21 @@ mod imp {
         TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::Threading::{
-        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetExitCodeProcess,
-        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, TerminateProcess,
+        WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect,
-        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-        SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+        BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_STYLE, GW_OWNER, SW_RESTORE,
+        WS_CAPTION, WS_THICKFRAME,
     };
 
-    const STILL_ACTIVE: u32 = 259;
+    /// The generic SYNCHRONIZE access right (0x0010_0000) — not exported as a
+    /// process-specific constant, but valid for `OpenProcess` so we can wait on
+    /// the handle. Typed as `PROCESS_ACCESS_RIGHTS` to OR with the others.
+    const SYNCHRONIZE: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGHTS(0x0010_0000);
 
     /// HWND of the window currently in the foreground, as a raw isize we can
     /// stash on a session and reuse later. `None` if there isn't one.
@@ -54,8 +59,14 @@ mod imp {
             let our_thread = GetCurrentThreadId();
 
             // Attaching our input thread to the current foreground's lets
-            // SetForegroundWindow actually take effect.
-            let _ = AttachThreadInput(our_thread, fg_thread, true);
+            // SetForegroundWindow actually take effect — but attaching a thread
+            // to itself fails, and a null foreground reports thread 0. Only
+            // attach when the foreground is a real, different thread; otherwise
+            // the attach is a silent no-op that makes `ok` misleading.
+            let attached = fg_thread != 0 && fg_thread != our_thread;
+            if attached {
+                let _ = AttachThreadInput(our_thread, fg_thread, true);
+            }
             // Restore only when minimized: SW_RESTORE on a maximized window
             // un-maximizes it, so an unconditional call resizes the target.
             if IsIconic(hwnd).as_bool() {
@@ -63,22 +74,29 @@ mod imp {
             }
             let _ = BringWindowToTop(hwnd);
             let ok = SetForegroundWindow(hwnd).as_bool();
-            let _ = AttachThreadInput(our_thread, fg_thread, false);
+            if attached {
+                let _ = AttachThreadInput(our_thread, fg_thread, false);
+            }
             ok
         }
     }
 
-    /// Whether a process is still running. `OpenProcess` + `GetExitCodeProcess`
-    /// == STILL_ACTIVE — the Windows analog of `kill(pid, 0)`.
+    /// Whether a process is still running — the Windows analog of `kill(pid, 0)`.
+    /// Uses a zero-timeout wait on the process handle rather than
+    /// `GetExitCodeProcess == STILL_ACTIVE (259)`: a process that genuinely
+    /// exited with code 259 is indistinguishable from "still running" under that
+    /// sentinel, so its session would never be crash-detected. `WAIT_TIMEOUT`
+    /// means the handle isn't signaled ⇒ still alive; signaled ⇒ exited.
     pub fn is_alive(pid: u32) -> bool {
         unsafe {
-            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            let Ok(handle) =
+                OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            else {
                 return false; // can't open ⇒ gone (or no rights; treat as gone)
             };
-            let mut code = 0u32;
-            let alive = GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE;
+            let wait = WaitForSingleObject(handle, 0);
             let _ = CloseHandle(handle);
-            alive
+            wait == WAIT_TIMEOUT
         }
     }
 
@@ -194,28 +212,42 @@ mod imp {
     /// Every visible top-level window with a title, plus its owning PID.
     fn top_level_windows() -> Vec<TopWindow> {
         unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let out = unsafe { &mut *(lparam.0 as *mut Vec<TopWindow>) };
-            unsafe {
-                // Skip invisible windows and owned popups (dialogs, tooltips).
-                if !IsWindowVisible(hwnd).as_bool() {
-                    return true.into();
+            // A panic unwinding across this `extern "system"` boundary is UB.
+            // Keep the whole body inside catch_unwind and always return TRUE so
+            // enumeration continues regardless.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let out = unsafe { &mut *(lparam.0 as *mut Vec<TopWindow>) };
+                unsafe {
+                    // Skip invisible windows and owned popups (dialogs, tooltips).
+                    if !IsWindowVisible(hwnd).as_bool() {
+                        return;
+                    }
+                    if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.0.is_null()) {
+                        return;
+                    }
+                    // Size the buffer to the real title length. A fixed 256-wide
+                    // buffer truncated long titles — VS Code tabs routinely
+                    // exceed 255 chars — so the project-name match in
+                    // session_window missed and the terminal jump focused the
+                    // wrong window.
+                    let title_len = GetWindowTextLengthW(hwnd);
+                    if title_len <= 0 {
+                        return;
+                    }
+                    let mut buf = vec![0u16; title_len as usize + 1];
+                    let len = GetWindowTextW(hwnd, &mut buf);
+                    if len <= 0 {
+                        return;
+                    }
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                    out.push(TopWindow {
+                        hwnd: hwnd.0 as isize,
+                        pid,
+                        title: String::from_utf16_lossy(&buf[..len as usize]),
+                    });
                 }
-                if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.0.is_null()) {
-                    return true.into();
-                }
-                let mut buf = [0u16; 256];
-                let len = GetWindowTextW(hwnd, &mut buf);
-                if len <= 0 {
-                    return true.into();
-                }
-                let mut pid = 0u32;
-                GetWindowThreadProcessId(hwnd, Some(&mut pid));
-                out.push(TopWindow {
-                    hwnd: hwnd.0 as isize,
-                    pid,
-                    title: String::from_utf16_lossy(&buf[..len as usize]),
-                });
-            }
+            }));
             true.into()
         }
 
@@ -290,6 +322,15 @@ mod imp {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.0.is_null() {
+                return false;
+            }
+
+            // A maximized *normal* window (a maximized editor/browser) covers
+            // the monitor rect too, but it keeps a caption and/or sizing border;
+            // a true fullscreen game/video strips both. Without this, the pill
+            // hides itself over a merely-maximized window.
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            if style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0 {
                 return false;
             }
 
