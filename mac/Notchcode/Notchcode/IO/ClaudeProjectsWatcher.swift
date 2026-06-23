@@ -94,8 +94,20 @@ final class ClaudeProjectsWatcher {
         print("[Notchcode] Watching \(path)")
 
         // Boot-time catch-up: scan the last week's JSONLs so the weekly token
-        // total reflects work done before Notchcode launched. After this the
-        // per-file cursor is at EOF; FSEvents take over from there.
+        // total reflects work done before Notchcode launched.
+        //
+        // Note the order: we start the live stream BEFORE the catch-up scan,
+        // the opposite of the Windows port — and deliberately so. The Windows
+        // bug was that catch-up and a separately-queued watcher event each
+        // billed the same bytes. Here both the scan and every FSEvent funnel
+        // through the same `ClaudeJSONLParser` actor, whose `parseNew` advances
+        // one per-file byte cursor atomically — so any given byte range is
+        // returned exactly once regardless of interleave (no double-count).
+        // Starting the stream first instead avoids the inverse hazard: FSEvents
+        // created with `kFSEventStreamEventIdSinceNow` won't replay writes that
+        // land before the stream starts, so scanning first would drop writes
+        // that arrive during a multi-second boot scan. Do not "fix" this into
+        // the Windows scan-then-watch ordering.
         catchUpWeek(rootPath: path)
     }
 

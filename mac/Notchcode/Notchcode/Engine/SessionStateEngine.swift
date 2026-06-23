@@ -137,19 +137,19 @@ final class SessionStateEngine {
     private var usageBuffer: [UsageEvent] = []
     nonisolated static let weekSeconds: TimeInterval = 7 * 24 * 60 * 60
 
-    /// Running per-agent totals over the buffer — incremented in `recordUsage`,
-    /// decremented in `pruneExpired` as events age out. Kept as counters
-    /// because the clockTick-driven computed properties re-evaluate every
-    /// second; reducing a week's worth of events each tick is too hot.
-    private var weeklyTokensByAgent: [Agent: Int] = [:]
-    private var weeklyDollarsByAgent: [Agent: Double] = [:]
-
     /// Tokens observed in the last 7 days for `agent`. Drives the badge and
     /// (against the agent's weekly budget) the brake threshold check.
+    ///
+    /// Summed from the (pruned) buffer on read rather than kept as a running
+    /// counter. Running accumulators drifted out of sync with the ticks — float
+    /// subtraction error on the dollar total, and clock-skew / out-of-order
+    /// events that got added but never cleanly subtracted — leaving the buffer
+    /// (one source of truth) and the counter disagreeing. A week's worth of
+    /// events is a cheap sum even at the 1s clock cadence.
     func weeklyTokens(for agent: Agent) -> Int {
         _ = clockTick
         pruneExpired()
-        return weeklyTokensByAgent[agent] ?? 0
+        return usageBuffer.reduce(0) { $0 + ($1.agent == agent ? $1.tokens : 0) }
     }
 
     /// API-rate dollar total over the last 7 days for `agent`. Informational
@@ -157,7 +157,7 @@ final class SessionStateEngine {
     func weeklyDollars(for agent: Agent) -> Double {
         _ = clockTick
         pruneExpired()
-        return weeklyDollarsByAgent[agent] ?? 0
+        return usageBuffer.reduce(0) { $0 + ($1.agent == agent ? $1.usd : 0) }
     }
 
     /// Tokens observed today (calendar day, local time) for `agent`. Walks the
@@ -230,20 +230,19 @@ final class SessionStateEngine {
         _ = clockTick
         pruneExpired()
         return Agent.allCases.filter {
-            (weeklyTokensByAgent[$0] ?? 0) > 0 || dollarsToday(for: $0) > 0
+            weeklyTokens(for: $0) > 0 || dollarsToday(for: $0) > 0
         }
     }
 
-    /// Drop events older than `weekSeconds`, keeping the running totals in
-    /// sync. Called from every reader so the buffer stays bounded without a
-    /// separate timer.
+    /// Drop events older than `weekSeconds`. Called from every reader so the
+    /// buffer stays bounded without a separate timer. Scans the whole buffer
+    /// rather than popping the front run, so a clock-skewed / out-of-order
+    /// event stamped before an already-pruned neighbour can't survive past the
+    /// window (the totals are summed from the buffer, so a stale straggler
+    /// would otherwise inflate them).
     private func pruneExpired() {
         let cutoff = Date().addingTimeInterval(-Self.weekSeconds)
-        while let first = usageBuffer.first, first.at < cutoff {
-            weeklyTokensByAgent[first.agent, default: 0] -= first.tokens
-            weeklyDollarsByAgent[first.agent, default: 0] -= first.usd
-            usageBuffer.removeFirst()
-        }
+        usageBuffer.removeAll { $0.at < cutoff }
     }
 
     /// Safety horizon for sessions whose status is explicit (.working, .waiting,
@@ -456,10 +455,9 @@ final class SessionStateEngine {
         at date: Date = .now
     ) {
         let key = agent.sessionKey(sessionId)
-        // Buffer is event-level; bounded by pruneExpired() on every read.
+        // Buffer is event-level; bounded by pruneExpired() on every read, and
+        // the single source of truth for weekly/today totals (summed on read).
         usageBuffer.append(UsageEvent(sessionId: key, agent: agent, tokens: tokens, usd: usd, at: date))
-        weeklyTokensByAgent[agent, default: 0] += tokens
-        weeklyDollarsByAgent[agent, default: 0] += usd
 
         let isRecent = Date().timeIntervalSince(date) < staleTimeout
         guard var session = sessions[key]
