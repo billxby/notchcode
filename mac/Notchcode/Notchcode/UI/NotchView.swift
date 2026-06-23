@@ -561,13 +561,13 @@ private struct ClaudeMascot: View {
             // "raised" foot loses a row of pixels so its top edge sits flush
             // with the body — visually it tucked up.
             HStack(spacing: 0) {
-                Foot(raised: !stepping)
+                Foot(raised: !stepping, color: color)
                 Spacer().frame(width: 1)
-                Foot(raised: stepping)
+                Foot(raised: stepping, color: color)
                 Spacer().frame(width: 2)
-                Foot(raised: !stepping)
+                Foot(raised: !stepping, color: color)
                 Spacer().frame(width: 1)
-                Foot(raised: stepping)
+                Foot(raised: stepping, color: color)
             }
             .offset(y: 5)
         }
@@ -582,9 +582,10 @@ private struct ClaudeMascot: View {
 
     private struct Foot: View {
         let raised: Bool
+        let color: Color
         var body: some View {
             Rectangle()
-                .fill(.black)
+                .fill(color)
                 .frame(width: 1.5, height: raised ? 1 : 2)
                 .offset(y: raised ? -0.5 : 0)
         }
