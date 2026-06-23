@@ -1,5 +1,5 @@
 # winget installer manifest (template).
-PackageIdentifier: BillXu.Notchcode
+PackageIdentifier: com.billxby.Notchcode
 PackageVersion: <VERSION>
 InstallerType: nsis
 Scope: user                          # NSIS installMode: currentUser

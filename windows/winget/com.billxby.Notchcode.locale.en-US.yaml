@@ -1,5 +1,5 @@
 # winget default-locale manifest (template).
-PackageIdentifier: BillXu.Notchcode
+PackageIdentifier: com.billxby.Notchcode
 PackageVersion: <VERSION>
 PackageLocale: en-US
 Publisher: Bill Xu
