@@ -187,10 +187,22 @@ actor ClaudeJSONLParser {
         if parsed.type == "assistant",
            let msg = parsed.message,
            let wire = msg.usage {
-            let cache5m = wire.cache_creation?.ephemeral_5m_input_tokens
-            let cache1h = wire.cache_creation?.ephemeral_1h_input_tokens
-            let cacheCreate5m = cache5m ?? wire.cache_creation_input_tokens ?? 0
-            let cacheCreate1h = cache1h ?? 0
+            // `cache_creation_input_tokens` is the *total* of all cache-write
+            // lanes. Only fall back to it when the per-lane `cache_creation`
+            // object is absent; when the object is present, read 5m/1h strictly
+            // from it (a missing lane is 0). Mixing the total into one lane while
+            // also reading the other from the object double-counts the tokens
+            // that appear in both — a payload carrying only the 1h lane plus the
+            // total used to bill the 1h tokens twice.
+            let cacheCreate5m: Int
+            let cacheCreate1h: Int
+            if let obj = wire.cache_creation {
+                cacheCreate5m = obj.ephemeral_5m_input_tokens ?? 0
+                cacheCreate1h = obj.ephemeral_1h_input_tokens ?? 0
+            } else {
+                cacheCreate5m = wire.cache_creation_input_tokens ?? 0
+                cacheCreate1h = 0
+            }
 
             let usage = CostTracker.Usage(
                 inputTokens:         wire.input_tokens ?? 0,

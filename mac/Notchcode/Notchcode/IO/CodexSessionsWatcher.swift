@@ -70,6 +70,11 @@ final class CodexSessionsWatcher {
         FSEventStreamStart(stream)
         print("[Notchcode] Watching \(path)")
 
+        // Live stream starts BEFORE the catch-up scan on purpose — see the long
+        // note in ClaudeProjectsWatcher.start(). Both paths share the single
+        // `CodexRolloutParser` actor's atomic per-file cursor, so interleaving
+        // can't double-count; starting the stream first avoids dropping writes
+        // that land mid-scan (FSEvents won't replay pre-start writes).
         catchUpWeek(rootPath: path)
     }
 
@@ -215,8 +220,25 @@ final class CodexSessionsWatcher {
         let parts = stem.split(separator: "-")
         if parts.count >= 5 {
             let candidate = parts.suffix(5).joined(separator: "-")
-            if candidate.count == 36 { return candidate }          // 32 hex + 4 hyphens
+            if isUUID(candidate) { return candidate }
         }
         return stem
+    }
+
+    /// True if `s` is a canonical 8-4-4-4-12 hex UUID. The old `count == 36`
+    /// check accepted any 36-character string, so a rollout filename whose
+    /// timestamp carried extra hyphens (e.g. `…T10-00-00-<uuid>`) could slip a
+    /// non-UUID trailing token past it — keying the file path differently from
+    /// the hook payload's `session_id` and splitting the session's state across
+    /// the two ingestion paths.
+    nonisolated static func isUUID(_ s: String) -> Bool {
+        let groups = s.split(separator: "-", omittingEmptySubsequences: false)
+        let widths = [8, 4, 4, 4, 12]
+        guard groups.count == widths.count else { return false }
+        for (group, width) in zip(groups, widths) {
+            guard group.count == width,
+                  group.allSatisfy(\.isHexDigit) else { return false }
+        }
+        return true
     }
 }

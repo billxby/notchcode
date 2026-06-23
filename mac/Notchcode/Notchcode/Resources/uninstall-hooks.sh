@@ -27,20 +27,22 @@ if [ ! -f "$SETTINGS" ]; then
     exit 0
 fi
 
-cp "$SETTINGS" "$BACKUP"
-
-python3 - "$SETTINGS" "$MARKER" <<'PYEOF'
+python3 - "$SETTINGS" "$MARKER" "$BACKUP" <<'PYEOF'
 import json
+import os
 import sys
+import tempfile
 
-settings_path, marker = sys.argv[1], sys.argv[2]
+settings_path, marker, backup_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
 with open(settings_path, "r") as f:
-    try:
-        cfg = json.load(f)
-    except json.JSONDecodeError as e:
-        sys.stderr.write(f"ERROR: {settings_path} is not valid JSON: {e}\n")
-        sys.exit(1)
+    original = f.read()
+
+try:
+    cfg = json.loads(original)
+except json.JSONDecodeError as e:
+    sys.stderr.write(f"ERROR: {settings_path} is not valid JSON: {e}\n")
+    sys.exit(1)
 
 hooks = cfg.get("hooks") or {}
 
@@ -58,14 +60,40 @@ for event_name, groups in list(hooks.items()):
     if not hooks[event_name]:
         del hooks[event_name]
 
+# True no-op when nothing of ours is present: don't back up and don't rewrite a
+# hand-edited config (which would reformat/normalize it for no reason).
+if removed == 0:
+    print("Nothing to remove — no Notchcode hooks present.")
+    sys.exit(0)
+
 if not hooks and "hooks" in cfg:
     del cfg["hooks"]
 
-with open(settings_path, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
+
+def write_atomic(path, text):
+    # temp file in the same dir, fsync, atomic rename — never truncate the
+    # user's config mid-write.
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".notchcode-tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# We're about to modify the file — back up the original first, then swap.
+with open(backup_path, "w") as f:
+    f.write(original)
+write_atomic(settings_path, json.dumps(cfg, indent=2) + "\n")
 
 print(f"Removed {removed} Notchcode hook entr{'y' if removed == 1 else 'ies'}.")
+print(f"Backup written to: {backup_path}")
 PYEOF
-
-echo "Backup written to: ${BACKUP}"

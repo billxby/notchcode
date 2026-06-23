@@ -38,9 +38,32 @@ cp "$SETTINGS" "$BACKUP"
 
 python3 - "$SETTINGS" "$MARKER" "$SEGMENT" "$MATCHER" <<'PYEOF'
 import json
+import os
 import sys
+import tempfile
 
 settings_path, marker, segment, matcher = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+
+def write_atomic(path, text):
+    # Write to a temp file in the same directory, fsync, then rename over the
+    # target. rename(2) is atomic within a filesystem, so a crash or kill can
+    # never leave the user's config truncated mid-write — readers see either
+    # the old file or the complete new one.
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".notchcode-tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 with open(settings_path, "r") as f:
     try:
@@ -88,9 +111,7 @@ for event in events:
     }
     hooks.setdefault(event, []).append(group)
 
-with open(settings_path, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
+write_atomic(settings_path, json.dumps(cfg, indent=2) + "\n")
 
 print("Notchcode hooks installed: " + ", ".join(events))
 PYEOF
