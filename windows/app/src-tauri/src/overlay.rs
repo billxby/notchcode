@@ -145,12 +145,18 @@ const PILL_SIZE: LogicalSize<f64> = LogicalSize::new(272.0, 64.0);
 /// content). Grows downward from the pill; the pill stays screen-centered
 /// because both sizes recenter on the same axis. Sized with the same shadow
 /// margin around the default 340px-wide panel card.
-const PANEL_SIZE: LogicalSize<f64> = LogicalSize::new(416.0, 480.0);
+const PANEL_SIZE: LogicalSize<f64> = LogicalSize::new(396.0, 478.0);
 
-/// Transparent margin the window keeps around the sheet card for its drop
-/// shadow (PANEL_SIZE 416×480 around the default 340×440 sheet).
-const SHEET_MARGIN_W: f64 = 76.0;
-const SHEET_MARGIN_H: f64 = 40.0;
+/// Transparent margin the window keeps around the sheet card — just enough to
+/// hold the sheet's drop shadow (--elev-3: ~32px down, ~22px sideways) and no
+/// more, so the window hugs the visible card instead of eating clicks in dead
+/// transparent space beside/below it. Sized a few px past the shadow's reach so
+/// it's contained, not clipped into a hard box. The card sits flush at the
+/// window's top edge, so all of the H margin is below it (where the shadow
+/// falls); the W margin splits evenly since the card is horizontally centered.
+/// Keep these in lockstep with --elev-3 in App.css.
+const SHEET_MARGIN_W: f64 = 56.0;
+const SHEET_MARGIN_H: f64 = 38.0;
 
 /// One-call entry point used by the setup hook: style the window, place it,
 /// reveal it, then keep it correctly placed as the display environment changes.

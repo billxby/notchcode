@@ -33,10 +33,15 @@
   --user: #8b93ff;
   --danger: #ff8a86;
 
-  /* Elevation — one consistent shadow scale instead of ad-hoc values. */
+  /* Elevation — one consistent shadow scale instead of ad-hoc values.
+     --elev-3 (the sheet) is deliberately kept within the transparent shadow
+     margin the window leaves around the card (SHEET_MARGIN_* in overlay.rs):
+     its furthest reach is ~32px down / 22px sideways, so it never gets clipped
+     into a hard-edged box at the window border. Don't grow these spreads
+     without growing that margin in lockstep. */
   --elev-1: 0 1px 2px rgba(0, 0, 0, 0.3);
   --elev-2: 0 2px 6px rgba(0, 0, 0, 0.28), 0 8px 20px rgba(0, 0, 0, 0.34);
-  --elev-3: 0 4px 12px rgba(0, 0, 0, 0.3), 0 22px 46px rgba(0, 0, 0, 0.5);
+  --elev-3: 0 2px 6px rgba(0, 0, 0, 0.32), 0 10px 22px rgba(0, 0, 0, 0.45);
 
   /* Motion — one rhythm for everything. */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
