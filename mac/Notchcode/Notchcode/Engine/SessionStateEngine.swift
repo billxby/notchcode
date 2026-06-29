@@ -134,7 +134,19 @@ final class SessionStateEngine {
 
     /// Rolling buffer of all events in (now - weekSeconds, now]. Order is
     /// insertion order (≈ chronological). Pruned lazily on each access.
-    private var usageBuffer: [UsageEvent] = []
+    ///
+    /// `@ObservationIgnored` is load-bearing, not an optimization. The usage
+    /// readers below (`weeklyTokens`, `pruneExpired`, …) both READ this buffer
+    /// (via `reduce`) and MUTATE it (`removeAll` in `pruneExpired`) within a
+    /// single call. Those readers run inside `NotchView.body`, so if the buffer
+    /// were observed, every render would register a dependency on it and then
+    /// invalidate that same dependency mid-render — `removeAll(where:)` fires
+    /// the Observation `willSet` unconditionally, even when it removes nothing.
+    /// That read-then-mutate cycle pins the main thread in an unbounded SwiftUI
+    /// re-render loop (the v1.2.0 "freeze + 100% CPU" bug). The UI doesn't need
+    /// this observed: usage display refreshes off the 1s `clockTick`, and
+    /// `recordUsage` redraws via the observed `sessions` write.
+    @ObservationIgnored private var usageBuffer: [UsageEvent] = []
     nonisolated static let weekSeconds: TimeInterval = 7 * 24 * 60 * 60
 
     /// Tokens observed in the last 7 days for `agent`. Drives the badge and
